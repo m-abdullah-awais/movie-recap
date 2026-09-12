@@ -1,0 +1,42 @@
+# Agent and tooling artifacts
+temp/
+CLAUDE.md
+AGENTS.md
+.agents
+.claude
+skills-lock.json
+claude-**.bat
+claude-rules.md
+
+# Project-scoped toolchain and caches (never installed globally)
+.python/
+.venv/
+.uv-cache/
+.models/
+
+# Pipeline working data
+cache/
+input/
+output/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Build output
+dist/
+build/
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

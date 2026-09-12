@@ -1,0 +1,18 @@
+[project]
+name = "movie-recap"
+version = "0.1.0"
+description = "Local movie recap generator. Turns a feature film into a narrated recap video."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "typer>=0.15",
+    "numpy>=1.26,<3",
+    "faster-whisper>=1.1",
+]
+
+[tool.uv]
+# Treat this as a virtual project. Only the dependencies are installed, the
+# project itself is never built or installed, which keeps setup fast and avoids
+# needing a build backend. analyze.py puts src/ on sys.path directly.
+package = false

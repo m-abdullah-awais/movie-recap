@@ -1,0 +1,476 @@
+"""Command line interface for the analysis stages.
+
+Every stage is independently runnable so that a failure or a tuning question can
+be investigated without re-running the expensive ones.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json as jsonlib
+import sys
+from pathlib import Path
+from typing import Optional
+
+import typer
+
+from . import config, ffmpeg, probe
+from .cache import Cache, StageOutcome, read_json, source_id
+from .config import CACHE_ROOT, Settings
+from .stages import ingest, proxy, scenemap
+from .timing import Report, format_hms
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Local movie recap generator. Analysis stages 1 to 3.",
+    # Typer's framed, syntax-highlighted traceback is far harder to read in a
+    # terminal than a plain one, and it buries the actual message. Expected
+    # failures are caught and reported as a single line; anything else raises a
+    # normal Python traceback.
+    pretty_exceptions_enable=False,
+)
+
+ALL_STAGES = ("ingest", "proxy", "scenemap")
+
+
+# Shared option definitions, declared once so every command stays consistent.
+MovieArg = typer.Argument(..., help="Path to the movie. Any container ffmpeg can read.")
+ForceOpt = typer.Option(False, "--force", help="Ignore the cache and recompute every stage.")
+ForceStageOpt = typer.Option(None, "--force-stage", help="Recompute only these stages.")
+HeightOpt = typer.Option(None, "--proxy-height", help="Proxy height in pixels. Default 480.")
+ThresholdOpt = typer.Option(None, "--threshold", help="Scene change threshold, 0 to 100. Default 8.")
+NoQsvOpt = typer.Option(False, "--no-qsv", help="Disable Quick Sync and encode in software.")
+CacheDirOpt = typer.Option(None, "--cache-dir", help="Override the cache root.")
+JsonOpt = typer.Option(False, "--json", help="Emit machine readable output.")
+QuietOpt = typer.Option(False, "--quiet", "-q", help="Suppress progress output.")
+
+
+def _settings(height: int | None, threshold: float | None, no_qsv: bool) -> Settings:
+    changes: dict[str, object] = {}
+    if height is not None:
+        changes["proxy_height"] = height
+    if threshold is not None:
+        changes["scene_threshold"] = threshold
+    if no_qsv:
+        changes["allow_qsv"] = False
+    return dataclasses.replace(Settings(), **changes) if changes else Settings()
+
+
+def _forced(stage: str, force_all: bool, force_stages: list[str] | None) -> bool:
+    return force_all or (bool(force_stages) and stage in force_stages)
+
+
+def _open(movie: Path, cache_dir: Path | None) -> tuple[Cache, dict, float]:
+    movie = movie.expanduser()
+    if not movie.is_file():
+        typer.secho(f"not a file: {movie}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    probe_data = ffmpeg.probe(movie)
+    if not ffmpeg.streams(probe_data, "video"):
+        typer.secho(f"{movie.name} has no video stream", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    sid = source_id(movie)
+    cache = Cache(cache_dir or CACHE_ROOT, sid, movie)
+    return cache, probe_data, ffmpeg.duration_seconds(probe_data)
+
+
+def _validate_stages(names: list[str] | None) -> list[str] | None:
+    if not names:
+        return None
+    unknown = [n for n in names if n not in ALL_STAGES]
+    if unknown:
+        typer.secho(
+            f"unknown stage(s): {', '.join(unknown)}. Valid: {', '.join(ALL_STAGES)}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(2)
+    return names
+
+
+def _run_ingest(cache, movie, probe_data, settings, report, *, force_all, force_stages, quiet):
+    """Ingest, pulling the proxy forward when speech recognition is needed.
+
+    Subtitle extraction needs nothing, but recognition needs the proxy audio, so
+    the proxy is run first in that case only. Because the proxy is cached, a
+    later explicit call to it costs nothing.
+
+    A failure to obtain dialogue is recorded rather than raised. The proxy and
+    the shot map do not depend on dialogue, so there is no reason to throw away
+    minutes of completed encoding because a speech model could not be
+    downloaded.
+    """
+    wav = cache.path(proxy.WAV_FILE)
+    proxy_outcome = None
+    force_ingest = _forced("ingest", force_all, force_stages)
+
+    def attempt(wav_path: Path | None) -> StageOutcome:
+        return ingest.run(
+            cache, movie, probe_data, settings,
+            wav=wav_path, force=force_ingest, quiet=quiet,
+        )
+
+    def failed(exc: Exception) -> StageOutcome:
+        if not quiet:
+            # Kept short here. The full reason is printed once in the final
+            # report, so stating it at both points would just be noise.
+            typer.secho(
+                "  could not obtain dialogue, continuing with the remaining stages",
+                fg=typer.colors.YELLOW,
+            )
+        return StageOutcome("ingest", "failed", 0.0, {}, "no dialogue obtained", str(exc))
+
+    try:
+        # When the proxy already exists the audio is available immediately, so
+        # recognition can be attempted on this first call. Both call sites
+        # therefore need the same failure handling.
+        outcome = attempt(wav if wav.is_file() else None)
+    except ingest.NeedsAudio:
+        # Listed before RuntimeError because it is a subclass of it.
+        if not quiet:
+            print("  no usable subtitles, producing the proxy first so audio is available")
+        proxy_outcome = proxy.run(
+            cache, movie, probe_data, settings,
+            force=_forced("proxy", force_all, force_stages), quiet=quiet,
+        )
+        report.add(proxy_outcome)
+        try:
+            outcome = attempt(wav)
+        except RuntimeError as exc:
+            outcome = failed(exc)
+    except RuntimeError as exc:
+        outcome = failed(exc)
+
+    report.add(outcome)
+    return outcome, proxy_outcome
+
+
+@app.command("all")
+def run_all(
+    movie: Path = MovieArg,
+    force: bool = ForceOpt,
+    force_stage: Optional[list[str]] = ForceStageOpt,
+    proxy_height: Optional[int] = HeightOpt,
+    threshold: Optional[float] = ThresholdOpt,
+    no_qsv: bool = NoQsvOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    json: bool = JsonOpt,
+    quiet: bool = QuietOpt,
+):
+    """Run ingest, proxy, and scenemap, then print per stage timings."""
+    force_stage = _validate_stages(force_stage)
+    settings = _settings(proxy_height, threshold, no_qsv)
+    cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+
+    if not quiet:
+        print(f"{movie.name}  ({format_hms(duration)}, source id {cache.sid[:12]})")
+        print(f"cache: {cache.dir}")
+
+    if not quiet:
+        print("\n[1/3] ingest")
+    _, proxy_outcome = _run_ingest(
+        cache, movie, probe_data, settings, report,
+        force_all=force, force_stages=force_stage, quiet=quiet,
+    )
+
+    if proxy_outcome is None:
+        if not quiet:
+            print("\n[2/3] proxy")
+        proxy_outcome = proxy.run(
+            cache, movie, probe_data, settings,
+            force=_forced("proxy", force, force_stage), quiet=quiet,
+        )
+        report.add(proxy_outcome)
+
+    if not quiet:
+        print("\n[3/3] scenemap")
+    report.add(scenemap.run(
+        cache, proxy_outcome.meta, settings,
+        force=_forced("scenemap", force, force_stage), quiet=quiet,
+    ))
+
+    timings = report.persist(cache.dir)
+
+    if json:
+        typer.echo(jsonlib.dumps({
+            "source": str(movie),
+            "source_id": cache.sid,
+            "cache_dir": str(cache.dir),
+            "total_seconds": round(report.total_seconds, 2),
+            "stages": [
+                {"name": o.name, "status": o.status, "seconds": round(o.seconds, 2),
+                 "summary": o.summary, "meta": o.meta}
+                for o in report.outcomes
+            ],
+        }, indent=2, default=str))
+        return
+
+    print("\n" + report.render())
+    print(f"\nartifacts in {cache.dir}")
+    print(f"timings appended to {timings.name}")
+
+    failures = [o for o in report.outcomes if o.failed]
+    if failures:
+        print()
+        for outcome in failures:
+            typer.secho(
+                f"{outcome.name} did not complete: {outcome.error}",
+                fg=typer.colors.RED, err=True,
+            )
+        raise typer.Exit(1)
+
+
+@app.command("ingest")
+def ingest_stage(
+    movie: Path = MovieArg,
+    force: bool = ForceOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 1 only. Extract dialogue from subtitles or speech recognition."""
+    settings = Settings()
+    cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    _run_ingest(cache, movie, probe_data, settings, report,
+                force_all=force, force_stages=None, quiet=quiet)
+    print("\n" + report.render())
+
+
+@app.command("proxy")
+def proxy_stage(
+    movie: Path = MovieArg,
+    force: bool = ForceOpt,
+    proxy_height: Optional[int] = HeightOpt,
+    threshold: Optional[float] = ThresholdOpt,
+    no_qsv: bool = NoQsvOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 2 only. Build the 480p proxy, the wav, and the raw scene data."""
+    settings = _settings(proxy_height, threshold, no_qsv)
+    cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    report.add(proxy.run(cache, movie, probe_data, settings, force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
+@app.command("scenemap")
+def scenemap_stage(
+    movie: Path = MovieArg,
+    force: bool = ForceOpt,
+    threshold: Optional[float] = ThresholdOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 3 only. Build the shot map from the scene data stage 2 emitted."""
+    settings = _settings(None, threshold, False)
+    cache, probe_data, duration = _open(movie, cache_dir)
+    meta_file = cache.path("proxy.meta.json")
+    if not meta_file.is_file():
+        typer.secho("the proxy stage has not run for this file yet", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    report = Report(movie, duration)
+    report.add(scenemap.run(cache, read_json(meta_file), settings, force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
+@app.command()
+def info(
+    movie: Path = MovieArg,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    json: bool = JsonOpt,
+):
+    """Probe a file and report its streams. Does no work and writes nothing."""
+    movie = movie.expanduser()
+    if not movie.is_file():
+        typer.secho(f"not a file: {movie}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+    probe_data = ffmpeg.probe(movie)
+    settings = Settings()
+    duration = ffmpeg.duration_seconds(probe_data)
+    subs = probe.classify_subtitles(probe_data, settings)
+    audio = probe.select_audio(probe_data, settings)
+
+    if json:
+        typer.echo(jsonlib.dumps({
+            "file": str(movie),
+            "duration_s": duration,
+            "container": (probe_data.get("format") or {}).get("format_name"),
+            "subtitles": [c.describe() for c in subs],
+            "audio_selected": audio.label if audio else None,
+        }, indent=2, default=str))
+        return
+
+    fmt = (probe_data.get("format") or {}).get("format_name", "unknown")
+    print(f"{movie.name}")
+    print(f"  container   {fmt}")
+    print(f"  runtime     {format_hms(duration)}")
+    print(f"  size        {movie.stat().st_size / 1e9:.2f} GB")
+
+    print("  video")
+    for stream in ffmpeg.streams(probe_data, "video"):
+        fps = f"{stream.fps:.3f}fps" if stream.fps else "unknown fps"
+        print(f"    {stream.label}  {stream.width}x{stream.height}  {fps}")
+
+    print("  audio")
+    for stream in ffmpeg.streams(probe_data, "audio"):
+        mark = " <- selected" if audio and stream.index == audio.index else ""
+        print(f"    {stream.label}  {stream.channels}ch{mark}")
+
+    print("  subtitles")
+    if not subs:
+        print("    none embedded")
+    for candidate in subs:
+        mark = "usable" if candidate.usable else f"unusable, {candidate.reason}"
+        print(f"    {candidate.stream.label}  [{candidate.kind}] {mark}")
+
+    sidecars = ingest.find_sidecars(movie)
+    print("  sidecar files")
+    print("    " + (", ".join(s.name for s in sidecars) if sidecars else "none"))
+
+    usable = [c for c in subs if c.usable]
+    if usable:
+        plan = f"embedded {usable[0].stream.label}"
+    elif sidecars:
+        plan = f"sidecar {sidecars[0].name}"
+    else:
+        plan = "speech recognition, the model will be downloaded on first use"
+    print(f"\n  dialogue source would be: {plan}")
+
+
+@app.command()
+def doctor():
+    """Check the environment and confirm nothing is installed outside the project."""
+    ok = True
+    print(f"project root      {config.ROOT}")
+    print(f"python            {sys.version.split()[0]}")
+
+    contained = config.is_contained(sys.prefix)
+    print(f"interpreter       {sys.prefix}")
+    if not contained:
+        ok = False
+        print("                  FAIL, not inside the project. Use .venv\\Scripts\\python.exe")
+    elif not sys.version.startswith("3.11"):
+        print("                  warning, expected Python 3.11")
+
+    print("\ncontained locations")
+    for name, target in config.CONTAINED_ENV.items():
+        status = "ok" if config.is_contained(target) else "OUTSIDE PROJECT"
+        if status != "ok":
+            ok = False
+        print(f"  {name:<24} {target}  [{status}]")
+
+    print("\nexternal tools")
+    for name, resolver in (("ffmpeg", ffmpeg.ffmpeg_bin), ("ffprobe", ffmpeg.ffprobe_bin)):
+        try:
+            print(f"  {name:<24} {resolver()}")
+        except ffmpeg.MissingBinary as exc:
+            ok = False
+            print(f"  {name:<24} MISSING, {exc}")
+
+    print("\nhardware acceleration")
+    try:
+        if ffmpeg.qsv_available():
+            print("  Quick Sync h264_qsv     available, proxy encoding will use it")
+        else:
+            print("  Quick Sync h264_qsv     unavailable, proxy will encode in software")
+    except ffmpeg.MissingBinary:
+        print("  Quick Sync h264_qsv     cannot test, ffmpeg is missing")
+
+    print("\npython packages")
+    for module, note in (("typer", "required"), ("numpy", "required"),
+                         ("faster_whisper", "needed only for films without subtitles")):
+        try:
+            __import__(module)
+            print(f"  {module:<24} present")
+        except ImportError:
+            if note == "required":
+                ok = False
+            print(f"  {module:<24} missing, {note}")
+
+    print("\n" + ("all checks passed" if ok else "problems found, see FAIL and MISSING above"))
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command("cache-list")
+def cache_list(cache_dir: Optional[Path] = CacheDirOpt):
+    """List cached analyses."""
+    root = cache_dir or CACHE_ROOT
+    if not root.is_dir():
+        print(f"no cache yet at {root}")
+        return
+    entries = sorted([d for d in root.iterdir() if d.is_dir()])
+    if not entries:
+        print(f"cache is empty at {root}")
+        return
+    for entry in entries:
+        stages = sorted(p.stem.replace(".meta", "") for p in entry.glob("*.meta.json"))
+        size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+        name = entry.name
+        for meta in entry.glob("*.meta.json"):
+            try:
+                name = read_json(meta).get("source_name", name)
+                break
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"{entry.name}  {size / 1e6:8.1f} MB  {', '.join(stages) or 'empty'}  {name}")
+
+
+@app.command("cache-clear")
+def cache_clear(
+    movie: Optional[Path] = typer.Argument(None, help="Clear only this movie's cache."),
+    cache_dir: Optional[Path] = CacheDirOpt,
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation."),
+):
+    """Delete cached artifacts. The source movie is never touched."""
+    import shutil
+
+    root = cache_dir or CACHE_ROOT
+    if movie:
+        movie = movie.expanduser()
+        if not movie.is_file():
+            typer.secho(f"not a file: {movie}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(2)
+        targets = [root / source_id(movie)[:16]]
+    else:
+        targets = [d for d in root.iterdir() if d.is_dir()] if root.is_dir() else []
+
+    targets = [t for t in targets if t.is_dir()]
+    if not targets:
+        print("nothing to clear")
+        return
+
+    total = sum(f.stat().st_size for t in targets for f in t.rglob("*") if f.is_file())
+    print(f"about to delete {len(targets)} cache folder(s), {total / 1e6:.1f} MB:")
+    for t in targets:
+        print(f"  {t}")
+    if not yes and not typer.confirm("proceed"):
+        print("cancelled")
+        return
+    for t in targets:
+        shutil.rmtree(t, ignore_errors=True)
+    print("cleared")
+
+
+def main() -> None:
+    """Entry point.
+
+    Expected failures, such as a missing binary or an unreadable file, are
+    reported as a single line rather than a traceback. Anything unexpected still
+    raises in full, because that is a bug worth seeing.
+    """
+    try:
+        app()
+    except (ffmpeg.MissingBinary, ffmpeg.FfmpegError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        typer.secho(
+            "\ninterrupted, no partial result was committed to the cache",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise SystemExit(130) from None
