@@ -22,25 +22,29 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "narrate"
-VERSION = 2  # bumped: speaking rate is now actually applied
+VERSION = 3  # bumped: selectable voice, folded into the per-line cache key
 
 NARRATION_FILE = "narration.json"
 AUDIO_DIR = "audio"
 
-PARAM_NAMES = ("narrate_gap_s", "piper_length_scale", "script_words_per_minute")
+PARAM_NAMES = (
+    "piper_voice", "narrate_gap_s", "piper_length_scale",
+    "script_words_per_minute",
+)
 
 
 class NoVoice(RuntimeError):
     """Neither Piper nor the system voice could speak."""
 
 
-def text_key(text: str, length_scale: float) -> str:
+def text_key(text: str, voice: str, length_scale: float) -> str:
     """Cache key for one spoken line.
 
-    The speaking rate is folded in, because the same words at a different rate
-    are a different audio file with a different duration.
+    The voice and the speaking rate are folded in, because the same words in a
+    different voice or at a different rate are a different audio file with a
+    different duration.
     """
-    blob = f"{length_scale}:{text}".encode("utf-8")
+    blob = f"{voice}:{length_scale}:{text}".encode("utf-8")
     return hashlib.blake2b(blob, digest_size=8).hexdigest()
 
 
@@ -143,7 +147,9 @@ class SystemSpeaker:
 
 def make_speaker(settings: Settings, quiet: bool):
     """Piper if its voice is available, otherwise the system voice."""
-    voice = models.ensure_piper_voice(quiet=quiet, attempts=2)
+    voice = models.ensure_piper_voice(
+        name=settings.piper_voice, quiet=quiet, attempts=2
+    )
     if voice is not None:
         try:
             speaker = PiperSpeaker(voice, settings.piper_length_scale)
@@ -197,7 +203,7 @@ def run(
         planned = []
         for segment in segments:
             text = str(segment.get("narration") or "").strip()
-            key = text_key(text, settings.piper_length_scale)
+            key = text_key(text, settings.piper_voice, settings.piper_length_scale)
             planned.append({
                 "segment": segment,
                 "text": text,

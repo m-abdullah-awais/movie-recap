@@ -63,14 +63,27 @@ CLIP_FILES = {
         "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/tokenizer.json",
 }
 
-# The Piper voice comes from a GitHub release rather than Hugging Face. It is the
-# same asset, and GitHub stays reachable on networks where Hugging Face rate
+# Piper voices come from a GitHub release rather than Hugging Face. They are the
+# same assets, and GitHub stays reachable on networks where Hugging Face rate
 # limits, which was the case on this machine.
-PIPER_VOICE_NAME = "en_US-lessac-medium"
-PIPER_VOICE_ARCHIVE = (
-    "https://github.com/rhasspy/piper/releases/download/v0.0.2/"
-    "voice-en-us-lessac-medium.tar.gz"
-)
+#
+# Keyed by the voice name so the narrator can be changed without touching code.
+# ryan is male, lessac is female; medium is the quality tier that narrates
+# clearly without the synthesis cost of high.
+_RELEASE = "https://github.com/rhasspy/piper/releases/download/v0.0.2/"
+PIPER_VOICES = {
+    "en_US-ryan-medium": _RELEASE + "voice-en-us-ryan-medium.tar.gz",
+    "en_US-ryan-high": _RELEASE + "voice-en-us-ryan-high.tar.gz",
+    "en_US-ryan-low": _RELEASE + "voice-en-us-ryan-low.tar.gz",
+    "en_US-danny-low": _RELEASE + "voice-en-us-danny-low.tar.gz",
+    "en_US-lessac-medium": _RELEASE + "voice-en-us-lessac-medium.tar.gz",
+    "en_US-lessac-low": _RELEASE + "voice-en-us-lessac-low.tar.gz",
+    "en_US-amy-low": _RELEASE + "voice-en-us-amy-low.tar.gz",
+    "en_US-kathleen-low": _RELEASE + "voice-en-us-kathleen-low.tar.gz",
+}
+
+# A male narrator, which is what this project wants for recap voiceover.
+DEFAULT_PIPER_VOICE = "en_US-ryan-medium"
 
 
 class DownloadFailed(RuntimeError):
@@ -196,33 +209,44 @@ class PiperVoice:
     name: str
 
 
-def piper_paths() -> PiperVoice:
+def piper_paths(name: str | None = None) -> PiperVoice:
+    voice_name = name or DEFAULT_PIPER_VOICE
     voice_dir = MODELS_DIR / "piper"
     return PiperVoice(
-        model=voice_dir / f"{PIPER_VOICE_NAME}.onnx",
-        config=voice_dir / f"{PIPER_VOICE_NAME}.onnx.json",
-        name=PIPER_VOICE_NAME,
+        model=voice_dir / f"{voice_name}.onnx",
+        config=voice_dir / f"{voice_name}.onnx.json",
+        name=voice_name,
     )
 
 
-def piper_available() -> bool:
-    voice = piper_paths()
+def piper_available(name: str | None = None) -> bool:
+    voice = piper_paths(name)
     return voice.model.is_file() and voice.config.is_file()
 
 
-def ensure_piper_voice(*, quiet: bool = False, attempts: int = 4) -> PiperVoice | None:
-    """Fetch and unpack the Piper voice, or return None so the caller can degrade."""
-    voice = piper_paths()
-    if piper_available():
+def ensure_piper_voice(
+    *, name: str | None = None, quiet: bool = False, attempts: int = 4
+) -> PiperVoice | None:
+    """Fetch and unpack a Piper voice, or return None so the caller can degrade."""
+    voice = piper_paths(name)
+    if piper_available(voice.name):
         return voice
 
+    url = PIPER_VOICES.get(voice.name)
+    if url is None:
+        if not quiet:
+            print(f"  unknown voice {voice.name}. Known: {', '.join(sorted(PIPER_VOICES))}")
+        return None
+
     voice_dir = voice.model.parent
-    archive = voice_dir / "voice.tar.gz"
+    # Named per voice, so fetching a second narrator does not collide with a
+    # partial download of the first.
+    archive = voice_dir / f"{voice.name}.tar.gz"
     try:
         if not archive.is_file():
             if not quiet:
-                print(f"  fetching the {PIPER_VOICE_NAME} voice, about 58 MB")
-            download(PIPER_VOICE_ARCHIVE, archive, attempts=attempts, timeout=300.0)
+                print(f"  fetching the {voice.name} voice, about 58 MB")
+            download(url, archive, attempts=attempts, timeout=600.0)
     except DownloadFailed as exc:
         if not quiet:
             print(f"  Piper voice unavailable: {exc}")
@@ -244,7 +268,7 @@ def ensure_piper_voice(*, quiet: bool = False, attempts: int = 4) -> PiperVoice 
             print(f"  the voice archive could not be unpacked: {exc}")
         return None
 
-    if not piper_available():
+    if not piper_available(voice.name):
         return None
     archive.unlink(missing_ok=True)
     return voice

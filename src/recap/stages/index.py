@@ -30,7 +30,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "index"
-VERSION = 3  # bumped: adaptive narrowing, keyframes named by timestamp
+VERSION = 5  # bumped: credits excluded, and the source frame rate recorded
 
 SHOTS_FILE = "shots.json"
 INDEX_FILE = "clip_index.npy"
@@ -40,6 +40,7 @@ KEYFRAME_DIR = "keyframes"
 PARAM_NAMES = (
     "index_window_s", "index_target_coverage", "index_min_window_s",
     "index_max_shots", "refine_shots", "refine_threshold", "clip_batch",
+    "credits_lead_in_s", "credits_lead_out_s",
 )
 
 
@@ -100,6 +101,47 @@ def narrow_adaptively(
         regions = narrow_regions(anchors, window, runtime_s)
 
     return regions, window
+
+
+def content_span(
+    transcript: dict, runtime_s: float, settings: Settings
+) -> tuple[float, float]:
+    """The stretch of film that is actually the film.
+
+    Studio logos and opening titles sit before the first spoken line, and end
+    credits sit after the last one, so the dialogue timing locates both without
+    any extra analysis. Measured on a 94 minute film, that excluded 34 seconds of
+    opening titles and 8.5 minutes of end credits, none of which is usable
+    footage for a recap.
+
+    A lead in and lead out are kept, because a film usually opens on an
+    establishing shot before anyone speaks and closes on a beat after the last
+    line. Falling back to the whole runtime is safe: the credits tail flag from
+    stage 3 still applies on top of this.
+    """
+    stats = transcript.get("stats") or {}
+    first = _num(stats.get("first_cue_s"), -1.0)
+    last = _num(stats.get("last_cue_s"), -1.0)
+    if first < 0 or last <= first:
+        return 0.0, runtime_s
+
+    start = max(0.0, first - max(0.0, settings.credits_lead_in_s))
+    end = min(runtime_s, last + max(0.0, settings.credits_lead_out_s))
+    if end <= start:
+        return 0.0, runtime_s
+    return round(start, 3), round(end, 3)
+
+
+def clamp_regions(
+    regions: list[tuple[float, float]], start: float, end: float
+) -> list[tuple[float, float]]:
+    """Trim narrowed regions to the film's content, dropping any that fall outside."""
+    out: list[tuple[float, float]] = []
+    for a, b in regions:
+        a2, b2 = max(a, start), min(b, end)
+        if b2 > a2:
+            out.append((round(a2, 3), round(b2, 3)))
+    return out
 
 
 def shots_in_regions(shots: list[dict], regions: list[tuple[float, float]]) -> list[dict]:
@@ -206,6 +248,8 @@ def run(
 
     script = read_json(script_path)
     scenes = read_json(scenes_path)
+    transcript_path = cache.path("transcript.json")
+    transcript = read_json(transcript_path) if transcript_path.is_file() else {}
     segments = script.get("segments") or []
     coarse = scenes.get("shots") or []
     runtime_s = _num(scenes.get("duration_s")) or _num(script.get("runtime_s"))
@@ -221,7 +265,16 @@ def run(
 
     artifacts = [SHOTS_FILE] + ([INDEX_FILE, QUERY_FILE] if have_clip else [])
 
+    video_streams = ffmpeg.streams(ffmpeg.probe(source), "video")
+    source_fps = round(video_streams[0].fps, 6) if video_streams and video_streams[0].fps else None
+
     def work() -> dict:
+        content_start, content_end = content_span(transcript, runtime_s, settings)
+        if not quiet and (content_start > 1.0 or content_end < runtime_s - 1.0):
+            print(f"  film content runs {content_start:.0f}s to {content_end:.0f}s, "
+                  f"discarding {content_start / 60:.1f} min of opening titles and "
+                  f"{(runtime_s - content_end) / 60:.1f} min of end credits")
+
         anchors = [_num(s.get("story_time")) for s in segments]
         regions, window = narrow_adaptively(
             anchors, runtime_s,
@@ -229,6 +282,11 @@ def run(
             settings.index_target_coverage,
             settings.index_min_window_s,
         )
+        regions = clamp_regions(regions, content_start, content_end)
+        if not regions:
+            raise RuntimeError(
+                "every narrowed region fell outside the film's content span"
+            )
         covered = sum(e - s for s, e in regions)
         if not quiet:
             print(f"  narrowed to {len(regions)} regions using a "
@@ -245,6 +303,17 @@ def run(
 
         # Longest first, so the cap keeps the shots most likely to cover a
         # segment's duration rather than a run of fragments.
+        # Boundaries can come from either stage 3 or PySceneDetect, so the
+        # content span is enforced here rather than trusted from upstream.
+        before = len(shots)
+        shots = [
+            sh for sh in shots
+            if _num(sh.get("start")) >= content_start - 0.001
+            and _num(sh.get("end")) <= content_end + 0.001
+        ]
+        if not quiet and before != len(shots):
+            print(f"  dropped {before - len(shots)} shots in the titles or credits")
+
         if len(shots) > settings.index_max_shots:
             shots = sorted(shots, key=lambda s: -_num(s.get("duration")))
             shots = sorted(shots[: settings.index_max_shots],
@@ -370,10 +439,20 @@ def run(
             "source_id": cache.sid,
             "source_name": cache.source.name,
             "runtime_s": round(runtime_s, 2),
+            # Recorded for stage 8, which must express clip lengths in whole
+            # frames. The concat demuxer quantises to frames and rounds down, so
+            # asking for an arbitrary duration loses up to one frame per clip.
+            "source_fps": source_fps,
             "regions": [{"start": s, "end": e} for s, e in regions],
+            "content_start_s": content_start,
+            "content_end_s": content_end,
             "shots": entries,
             "stats": {
                 "region_count": len(regions),
+                "content_start_s": content_start,
+                "content_end_s": content_end,
+                "titles_discarded_s": round(content_start, 1),
+                "credits_discarded_s": round(runtime_s - content_end, 1),
                 "covered_seconds": round(covered, 1),
                 "covered_fraction": round(covered / max(1.0, runtime_s), 4),
                 "shot_count": len(entries),

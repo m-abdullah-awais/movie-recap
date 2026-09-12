@@ -27,6 +27,9 @@ CONTAINED_ENV: dict[str, Path] = {
 }
 
 CACHE_ROOT = ROOT / "cache"
+# Finished videos are published here under a timestamped name, so a re-run
+# never overwrites a render you wanted to keep.
+OUTPUT_DIR = ROOT / "output"
 MODELS_DIR = ROOT / ".models"
 VENV_DIR = ROOT / ".venv"
 
@@ -199,6 +202,14 @@ class Settings:
     # fixed window narrows nothing when the narration is dense: measured on a 94
     # minute film with 77 segments a median 62 seconds apart, a 90 second window
     # merged into four regions covering 99 percent of the film.
+    # Studio logos, opening titles and end credits are never usable footage.
+    # The dialogue itself says where they are: on a 94 minute film the first
+    # spoken line landed at 34 seconds and the last at 5143 of 5650, leaving 8.5
+    # minutes of end credits with no speech at all. A lead in and lead out keep
+    # the establishing shot before the first line and the closing beat after the
+    # last one.
+    credits_lead_in_s: float = 10.0
+    credits_lead_out_s: float = 20.0
     index_window_s: float = 90.0
     index_target_coverage: float = 0.30
     index_min_window_s: float = 5.0
@@ -219,6 +230,9 @@ class Settings:
     # A short gap between lines stops the narration sounding rushed and gives the
     # render a natural place to change shot. Length scale is Piper's speaking
     # rate, where above 1.0 is slower.
+    # A male narrator by default. Piper's ryan is male, lessac is female. The
+    # name must be one of the keys in models.PIPER_VOICES.
+    piper_voice: str = "en_US-ryan-medium"
     narrate_gap_s: float = 0.35
     # Above 1.0 is slower, and the response is not linear in words per minute.
     # Measured on the Lessac medium voice: 1.0 gives 205 wpm, 1.6 gives 170, and

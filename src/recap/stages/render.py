@@ -19,25 +19,77 @@ leading frames. The default is a hardware re-encode, which is frame accurate.
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import time
+import wave
 from pathlib import Path
 
 from .. import ffmpeg, probe
 from ..cache import Cache, StageOutcome, atomic_path, read_json, run_stage, write_json
-from ..config import Settings
+from ..config import OUTPUT_DIR, Settings
 
 STAGE = "render"
-VERSION = 2  # bumped: subtitles timed to speech, not to footage
+VERSION = 6  # bumped: gap at the narration rate, final video written atomically
 
 FINAL_FILE = "final.mp4"
+# Written here first, then moved into place. See the note in run().
+FINAL_TMP = "final.mp4.part"
 SUBTITLE_FILE = "subtitle.srt"
 CLIPLIST_FILE = "clips.concat.txt"
 NARRATION_WAV = "narration_track.wav"
-SILENCE_WAV = "gap.wav"
+# Named by sample rate. The gap must match the narration exactly, and a file
+# cached from a run with a different voice would silently be the wrong length.
+SILENCE_WAV_FMT = "gap_{rate}hz.wav"
 
 PARAM_NAMES = (
     "render_height", "render_crf", "qsv_quality", "allow_qsv", "copy_video",
     "duck_threshold", "duck_ratio", "narration_gain", "source_gain",
 )
+
+
+_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9 ._-]+")
+
+
+def safe_name(text: str, fallback: str = "recap") -> str:
+    """A filename-safe version of a film title."""
+    cleaned = _UNSAFE_NAME_RE.sub("", str(text or "")).strip().strip(".")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:90] or fallback
+
+
+def publish(final: Path, subtitles: Path, title: str) -> tuple[Path, Path]:
+    """Place the finished video in output/ under a timestamped name.
+
+    A hard link is used where the filesystem allows it, so a 300 MB video is not
+    copied twice onto a disk that is already near full. The link is a real second
+    directory entry, so clearing the cache later leaves the published file
+    intact, which is the behaviour worth having.
+
+    The name carries a timestamp so a re-run never overwrites a render worth
+    keeping. That only holds because the render writes a new file and moves it
+    into place rather than overwriting the previous one: hard links to a file
+    that is truncated and rewritten all change together, which would make these
+    timestamps look like history while being a single mutable file.
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    stem = f"{safe_name(title)} - {stamp}"
+
+    video = OUTPUT_DIR / f"{stem}.mp4"
+    caption = OUTPUT_DIR / f"{stem}.srt"
+
+    for source, destination in ((final, video), (subtitles, caption)):
+        if not source.is_file():
+            continue
+        destination.unlink(missing_ok=True)
+        try:
+            os.link(source, destination)
+        except (OSError, NotImplementedError):
+            # Different volume, or a filesystem without hard links.
+            shutil.copy2(source, destination)
+
+    return video, caption
 
 
 def _num(value, default: float = 0.0) -> float:
@@ -102,6 +154,29 @@ def write_clip_list(target: Path, source: Path, timeline: list[dict]) -> int:
     return count
 
 
+def narration_format(cache: Cache, timeline: list[dict]) -> tuple[int, int]:
+    """Sample rate and channel count of the spoken lines.
+
+    Read from the audio itself rather than taken from a setting. The concat
+    demuxer adopts the parameters of the first file it opens and does not
+    resample the rest, so a silence gap generated at a different rate plays at
+    the wrong length. That happened here: the gap was produced at the 16 kHz rate
+    used for speech recognition input while Piper writes 22050 Hz, so every 0.35
+    second gap ran for 0.254 seconds and the track finished 7.3 seconds short of
+    what every other stage believed.
+    """
+    for entry in timeline:
+        wav = cache.dir / str(entry.get("wav") or "")
+        if not wav.is_file():
+            continue
+        try:
+            with wave.open(str(wav), "rb") as handle:
+                return handle.getframerate(), handle.getnchannels()
+        except (wave.Error, OSError):
+            continue
+    return 22050, 1
+
+
 def build_narration_track(
     cache: Cache, timeline: list[dict], gap_s: float, settings: Settings, quiet: bool
 ) -> Path:
@@ -112,12 +187,14 @@ def build_narration_track(
     length recap has enough lines that the filter graph approach becomes
     unwieldy, and this keeps the command the same size regardless.
     """
-    silence = cache.path(SILENCE_WAV)
+    rate, channels = narration_format(cache, timeline)
+    layout = "mono" if channels < 2 else "stereo"
+    silence = cache.path(SILENCE_WAV_FMT.format(rate=rate))
     if not silence.is_file() or silence.stat().st_size == 0:
         ffmpeg.run([
             ffmpeg.ffmpeg_bin(), "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
             "-f", "lavfi",
-            "-i", f"anullsrc=r={settings.audio_rate}:cl=mono",
+            "-i", f"anullsrc=r={rate}:cl={layout}",
             "-t", f"{max(0.01, gap_s):.3f}",
             "-c:a", "pcm_s16le",
             str(silence),
@@ -129,7 +206,15 @@ def build_narration_track(
         wav = cache.dir / str(entry.get("wav") or "")
         if not wav.is_file():
             continue
-        lines.append(f"file '{wav.name if wav.parent == cache.dir else wav.as_posix()}'")
+        # ffmpeg runs with its working directory set to the cache folder, so the
+        # path is written relative to that where possible and fully resolved
+        # otherwise. Writing whatever as_posix happens to give only works while
+        # the cache root is absolute, which is not something to rely on.
+        try:
+            listed = wav.resolve().relative_to(cache.dir.resolve()).as_posix()
+        except ValueError:
+            listed = wav.resolve().as_posix()
+        lines.append(f"file '{listed}'")
         if position < len(timeline) - 1:
             lines.append(f"file '{silence.name}'")
     listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -140,9 +225,22 @@ def build_narration_track(
         ffmpeg.ffmpeg_bin(), "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
         "-f", "concat", "-safe", "0",
         "-i", listing.name,
-        "-c:a", "pcm_s16le", "-ac", "1", "-ar", str(settings.audio_rate),
+        # Output at the narration's own rate, so nothing is resampled and the
+        # joined track is exactly as long as the pieces that went into it.
+        "-c:a", "pcm_s16le", "-ac", str(channels), "-ar", str(rate),
         target.name,
     ], cwd=cache.dir, timeout=900)
+
+    produced = _num(
+        ffmpeg.probe(target).get("format", {}).get("duration")
+    )
+    expected = sum(_num(e.get("spoken_s")) or _num(e.get("seconds")) for e in timeline)
+    expected += gap_s * max(0, len(timeline) - 1)
+    if abs(produced - expected) > 0.5 and not quiet:
+        # Worth saying out loud. A mismatch here silently shortens the finished
+        # video, because the render trims to whichever stream is shorter.
+        print(f"  warning: narration track is {produced:.2f}s but the timeline "
+              f"expects {expected:.2f}s")
     return target
 
 
@@ -223,6 +321,14 @@ def run(
 
     gap_s = _num(edl.get("gap_s"), 0.35)
     params = settings.params(*PARAM_NAMES)
+    # Same reasoning as stage 8: chain the upstream key so a new edit list always
+    # produces a new render rather than serving the previous video.
+    select_meta = cache.path("select.meta.json")
+    if select_meta.is_file():
+        try:
+            params["select_key"] = read_json(select_meta).get("key")
+        except Exception:  # noqa: BLE001
+            params["select_key"] = None
     params["edl_lines"] = len(timeline)
     params["edl_clips"] = sum(len(t.get("clips") or []) for t in timeline)
 
@@ -262,7 +368,7 @@ def run(
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart",
             "-shortest",
-            FINAL_FILE,
+            FINAL_TMP,
         ]
 
         def report(done: float, total: float) -> None:
@@ -291,7 +397,7 @@ def run(
                 "-map", "0:v:0", "-map", "[mix]",
                 *video_args(settings, use_qsv=False),
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                "-movflags", "+faststart", "-shortest", FINAL_FILE,
+                "-movflags", "+faststart", "-shortest", FINAL_TMP,
             ]
             del tail
             ffmpeg.run_with_progress(
@@ -303,14 +409,37 @@ def run(
         if not quiet:
             print("\r" + " " * 70 + "\r", end="")
 
+        produced = cache.path(FINAL_TMP)
+        if not produced.is_file() or produced.stat().st_size == 0:
+            raise RuntimeError("ffmpeg reported success but wrote no video")
+
+        # Replacing the file gives it a new inode. ffmpeg writing the final
+        # name directly would truncate and reuse the existing one, and since
+        # published copies are hard links to it, every previously published
+        # render would silently change content along with it. That makes the
+        # timestamped names look like history while being one mutable file.
         final = cache.path(FINAL_FILE)
+        os.replace(produced, final)
         final_probe = ffmpeg.probe(final)
         video = (ffmpeg.streams(final_probe, "video") or [None])[0]
         duration = ffmpeg.duration_seconds(final_probe)
 
+        script_path = cache.path("script.json")
+        title = cache.source.stem
+        if script_path.is_file():
+            try:
+                title = read_json(script_path).get("title") or title
+            except Exception:  # noqa: BLE001 - a missing title is not a failure
+                pass
+        published, published_srt = publish(final, cache.path(SUBTITLE_FILE), title)
+        if not quiet:
+            print(f"  published to output\\{published.name}")
+
         return {
             "final": FINAL_FILE,
             "subtitles": SUBTITLE_FILE,
+            "published": str(published.relative_to(published.parents[1])),
+            "published_srt": str(published_srt.relative_to(published_srt.parents[1])),
             "subtitle_count": subtitle_count,
             "clip_count": clip_count,
             "line_count": len(timeline),

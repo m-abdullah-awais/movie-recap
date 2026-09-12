@@ -20,7 +20,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 3  # bumped: cache key chains the index stage and CLIP availability
+VERSION = 5  # bumped: clip lengths quantised to whole frames
 
 EDL_FILE = "edl.json"
 
@@ -64,6 +64,26 @@ def proximity_score(shot_start: float, story_time: float, sigma_s: float) -> flo
     return float(np.exp(-(delta * delta) / (2.0 * max(1.0, sigma_s) ** 2)))
 
 
+def quantise(duration: float, fps: float | None) -> tuple[float, float]:
+    """Round a clip length to whole frames, and return the out point to request.
+
+    The concat demuxer keeps frames whose timestamp falls inside the in and out
+    points, so an arbitrary out point yields however many whole frames happen to
+    fit, rounding down. Measured on a 24 fps film that lost about half a frame
+    per clip, which over 366 clips accumulated to 7.3 seconds and left the
+    footage running steadily ahead of the narration it was chosen for.
+
+    Asking for the frame count plus half a frame makes the arithmetic land on the
+    intended count exactly. The returned pair is the duration to account for and
+    the slightly longer span to request.
+    """
+    if not fps or fps <= 0:
+        return duration, duration
+    frames = max(1, int(round(duration * fps)))
+    exact = frames / fps
+    return exact, (frames + 0.5) / fps
+
+
 def run(
     cache: Cache,
     settings: Settings,
@@ -81,6 +101,7 @@ def run(
     narration = read_json(narration_path)
     index = read_json(shots_path)
     runtime_s = _num(index.get("runtime_s"))
+    source_fps = index.get("source_fps")
     lines = narration.get("segments") or []
     shots = [s for s in (index.get("shots") or []) if s.get("has_keyframe")]
     if not lines:
@@ -95,6 +116,16 @@ def run(
     # invalidates this stage too. Without it, a cached result produced before the
     # CLIP model arrived stays valid forever and selection silently keeps scoring
     # on time proximity alone even though embeddings are now available.
+    # The narrate stage's key matters just as much: a different voice or speaking
+    # rate changes every line's duration, and this stage sizes footage to those
+    # durations. Serving a cached edit list across that change would leave the
+    # video and the audio different lengths.
+    narrate_meta = cache.path("narrate.meta.json")
+    if narrate_meta.is_file():
+        try:
+            params["narrate_key"] = read_json(narrate_meta).get("key")
+        except Exception:  # noqa: BLE001
+            params["narrate_key"] = None
     index_meta = cache.path("index.meta.json")
     if index_meta.is_file():
         try:
@@ -214,11 +245,15 @@ def run(
                 # Centre the clip in its shot so it avoids the cut at either end.
                 offset = max(0.0, (available - take) / 2.0)
                 clip_start = float(starts[best]) + offset
+                exact, request = quantise(take, source_fps)
+                take = exact
                 clips.append({
                     "shot_i": shots[best].get("i", best),
-                    "src_start": round(clip_start, 3),
-                    "src_end": round(clip_start + take, 3),
-                    "duration": round(take, 3),
+                    "src_start": round(clip_start, 4),
+                    # The out point is half a frame past the last wanted frame,
+                    # so the demuxer's rounding lands on the intended count.
+                    "src_end": round(clip_start + request, 4),
+                    "duration": round(exact, 4),
                     "score": round(float(adjusted[best]), 4),
                     "similarity": round(float(similarity[best]), 4) if use_clip else None,
                 })
@@ -232,14 +267,18 @@ def run(
             # The last clip absorbs any shortfall, so the footage under a line is
             # exactly as long as the line itself. A gap here would desynchronise
             # everything after it.
+            # Any shortfall is absorbed into the last clip, still on a frame
+            # boundary, and clamped so it never asks for footage past the end of
+            # the film. What remains is under half a frame per line rather than
+            # accumulating across the whole recap.
             drift = need - sum(c["duration"] for c in clips)
             if abs(drift) > 0.001:
                 last = clips[-1]
-                # Clamped to the runtime. Absorbing drift into the last clip can
-                # otherwise ask for footage from past the end of the film.
-                new_end = min(runtime_s, last["src_end"] + drift)
-                last["src_end"] = round(new_end, 3)
-                last["duration"] = round(new_end - last["src_start"], 3)
+                wanted = max(0.0, last["duration"] + drift)
+                exact, request = quantise(wanted, source_fps)
+                end = min(runtime_s, last["src_start"] + request)
+                last["src_end"] = round(end, 4)
+                last["duration"] = round(min(exact, end - last["src_start"]), 4)
 
             timeline.append({
                 "i": len(timeline),
