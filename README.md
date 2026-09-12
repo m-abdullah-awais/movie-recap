@@ -27,16 +27,15 @@ needed.
 | 1 | `ingest` | Extract dialogue from embedded subtitles, a sidecar file, or speech recognition | Built |
 | 2 | `proxy` | One ffmpeg read of the film producing scene data and a 16 kHz mono wav | Built |
 | 3 | `scenemap` | Coarse shot boundaries across the whole film | Built |
-| 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Planned |
+| 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
 | 5 | `script` | Claude turns the story into narration segments with visual queries | Planned |
 | 6 | `index` | Shot detection and CLIP embedding, restricted to relevant regions | Planned |
 | 7 | `narrate` | Piper text to speech per segment, cached by text hash | Planned |
 | 8 | `select` | Score and pick shots for each narration segment | Planned |
 | 9 | `render` | ffmpeg assembles the final video, stream-copying the source | Planned |
 
-Stages 1 to 3 are complete and are the subject of this release. The remaining
-stages are deliberately unwritten until real timings from a full length film
-confirm the approach is viable on the target hardware.
+Stages 1 to 4 are complete. The remaining stages are built one at a time, each
+measured on a real film before the next begins.
 
 The film is read exactly once, in stage 2. No full-film video proxy is written,
 because nothing downstream needs one: stage 6 indexes only the regions the
@@ -49,12 +48,13 @@ the pipeline saw.
 On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
 94 minute HEVC Main 10 1080p film carrying English subtitles.
 
-| Stage | Time |
-| --- | --- |
-| `ingest` | 0:01 |
-| `proxy` | 7:13 |
-| `scenemap` | 0:00 |
-| Total | 7:14, or 13x realtime |
+| Stage | Time | Cost |
+| --- | --- | --- |
+| `ingest` | 0:01 | |
+| `proxy` | 7:13 | |
+| `scenemap` | 0:00 | |
+| `story` | 3:44 | $1.58 |
+| Total | 10:58 | $1.58 |
 
 Reading the film is effectively the entire cost, and it is unavoidable. Scale by
 your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
@@ -142,6 +142,7 @@ Each stage runs on its own for debugging.
 .\.venv\Scripts\python.exe analyze.py ingest   "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py proxy    "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py scenemap "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe analyze.py story    "D:\films\movie.mkv"
 ```
 
 ### Useful flags
@@ -165,6 +166,18 @@ Each stage runs on its own for debugging.
 ```
 
 ## How it works
+
+### Story understanding
+
+Stage 4 sends one Claude call per ten minute window of dialogue, then a single
+synthesis call merges the windows into a whole-film structure. Every call is
+cached individually by the hash of its prompt, so a failed run never repays for
+the windows that already succeeded, and a re-run costs nothing.
+
+Calls use `--system-prompt`, which replaces the default system prompt outright
+and keeps this project's own memory files out of an analysis call. Flags stay
+identical between calls so each one after the first reuses the same prompt cache
+prefix. That is the difference between five cents and twenty-five cents a call.
 
 ### Caching
 
@@ -236,6 +249,8 @@ Written to `cache/<source_id>/`.
 | `proxy.wav` | proxy | 16 kHz mono audio for speech recognition |
 | `scdet.raw.txt` | proxy | Candidate scene changes with their scores |
 | `scenes.json` | scenemap | Shot list with statistics |
+| `story.json` | story | Cast, acts, beats, setups and payoffs, twists |
+| `story_calls/` | story | One cached response per Claude call |
 | `timings.json` | all | Per-stage timings for every run |
 
 ## Project layout

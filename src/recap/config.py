@@ -124,6 +124,20 @@ class Settings:
     tail_fraction: float = 0.06
     fallback_shot_s: float = 4.0
 
+    # Stage 4, story. All AI reasoning goes through headless Claude Code.
+    #
+    # Ten minute windows keep each call's attention on a manageable stretch of
+    # film while still giving enough context to describe a scene. A trailing
+    # overlap stops a beat that straddles a boundary from being lost by both
+    # neighbours. Concurrency is low on purpose: each call waits around twenty
+    # seconds on the network, so a handful in flight hides the latency without
+    # pushing the account's rate limit.
+    story_chunk_s: int = 600
+    story_overlap_s: int = 45
+    claude_model: str = ""  # empty means the session default
+    claude_concurrency: int = 3
+    claude_timeout_s: int = 300
+
     # Stage 1, ingest
     preferred_langs: tuple[str, ...] = ("eng", "en", "english")
     asr_model: str = "small.en"

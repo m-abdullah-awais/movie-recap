@@ -14,16 +14,16 @@ from typing import Optional
 
 import typer
 
-from . import config, ffmpeg, probe
+from . import claude, config, ffmpeg, probe
 from .cache import Cache, StageOutcome, read_json, source_id
 from .config import CACHE_ROOT, Settings
-from .stages import ingest, proxy, scenemap
+from .stages import ingest, proxy, scenemap, story
 from .timing import Report, format_hms
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Local movie recap generator. Analysis stages 1 to 3.",
+    help="Local movie recap generator. Analysis stages 1 to 4.",
     # Typer's framed, syntax-highlighted traceback is far harder to read in a
     # terminal than a plain one, and it buries the actual message. Expected
     # failures are caught and reported as a single line; anything else raises a
@@ -31,7 +31,7 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
-ALL_STAGES = ("ingest", "proxy", "scenemap")
+ALL_STAGES = ("ingest", "proxy", "scenemap", "story")
 
 
 # Shared option definitions, declared once so every command stays consistent.
@@ -205,7 +205,7 @@ def run_all(
     json: bool = JsonOpt,
     quiet: bool = QuietOpt,
 ):
-    """Run ingest, proxy, and scenemap, then print per stage timings."""
+    """Run stages 1 to 4, then print per stage timings."""
     force_stage = _validate_stages(force_stage)
     settings = _settings(proxy_height, threshold, no_qsv, with_proxy)
     movie, cache, probe_data, duration = _open(movie, cache_dir)
@@ -216,15 +216,15 @@ def run_all(
         print(f"cache: {cache.dir}")
 
     if not quiet:
-        print("\n[1/3] ingest")
-    _, proxy_outcome = _run_ingest(
+        print("\n[1/4] ingest")
+    ingest_outcome, proxy_outcome = _run_ingest(
         cache, movie, probe_data, settings, report,
         force_all=force, force_stages=force_stage, quiet=quiet,
     )
 
     if proxy_outcome is None:
         if not quiet:
-            print("\n[2/3] proxy")
+            print("\n[2/4] proxy")
         proxy_outcome = proxy.run(
             cache, movie, probe_data, settings,
             force=_forced("proxy", force, force_stage), quiet=quiet,
@@ -232,11 +232,29 @@ def run_all(
         report.add(proxy_outcome)
 
     if not quiet:
-        print("\n[3/3] scenemap")
+        print("\n[3/4] scenemap")
     report.add(scenemap.run(
         cache, proxy_outcome.meta, settings,
         force=_forced("scenemap", force, force_stage), quiet=quiet,
     ))
+
+    # Stage 4 needs dialogue. When ingest could not produce any there is nothing
+    # to read, so it is skipped rather than reported as a failure.
+    if ingest_outcome.failed:
+        if not quiet:
+            print("\n[4/4] story  skipped, no dialogue was obtained")
+    else:
+        if not quiet:
+            print("\n[4/4] story")
+        try:
+            report.add(story.run(
+                cache, settings,
+                force=_forced("story", force, force_stage), quiet=quiet,
+            ))
+        except (RuntimeError, claude.ClaudeUnavailable) as exc:
+            if not quiet:
+                typer.secho("  story did not complete, continuing", fg=typer.colors.YELLOW)
+            report.add(StageOutcome("story", "failed", 0.0, {}, "no story built", str(exc)))
 
     timings = report.persist(cache.dir)
 
@@ -321,6 +339,21 @@ def scenemap_stage(
         raise typer.Exit(1)
     report = Report(movie, duration)
     report.add(scenemap.run(cache, read_json(meta_file), settings, force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
+@app.command("story")
+def story_stage(
+    movie: Optional[Path] = MovieArg,
+    force: bool = ForceOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 4 only. Read the dialogue through Claude and build the story."""
+    settings = Settings()
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    report.add(story.run(cache, settings, force=force, quiet=quiet))
     print("\n" + report.render())
 
 
