@@ -11,6 +11,7 @@ than the pipeline stopping.
 
 from __future__ import annotations
 
+import os
 import shutil
 import tarfile
 import time
@@ -23,6 +24,32 @@ from typing import Callable
 from .config import MODELS_DIR
 
 _USER_AGENT = "movie-recap/0.1 (local, no telemetry)"
+
+# Hugging Face throttles anonymous traffic far harder than authenticated
+# traffic, so a token is used when one is available. It is read from the
+# environment or from the standard credential file, never stored in this project
+# and never printed.
+_TOKEN_ENV = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_HUB_TOKEN")
+_TOKEN_FILES = (
+    Path.home() / ".cache" / "huggingface" / "token",
+    Path.home() / ".huggingface" / "token",
+)
+
+
+def hf_token() -> str | None:
+    """Hugging Face credential, if the user has one configured."""
+    for name in _TOKEN_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    for path in _TOKEN_FILES:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return None
 
 # CLIP ViT-B/32 exported to ONNX and quantized to int8. PyTorch is deliberately
 # not used anywhere in this project: it is two gigabytes for capability the
@@ -83,7 +110,11 @@ def download(
 
     for attempt in range(attempts):
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+            headers = {"User-Agent": _USER_AGENT}
+            token = hf_token() if "huggingface.co" in url else None
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            request = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 total = int(response.headers.get("Content-Length") or 0)
                 done = 0

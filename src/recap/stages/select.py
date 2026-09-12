@@ -20,7 +20,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 1
+VERSION = 2  # bumped: records spoken duration separately
 
 EDL_FILE = "edl.json"
 
@@ -232,7 +232,12 @@ def run(
                 "i": len(timeline),
                 "script_i": line.get("script_i"),
                 "start_s": line.get("start_s"),
+                # Two durations, deliberately. 'seconds' is how much footage the
+                # line needs, which includes the silence after it. 'spoken_s' is
+                # how long the voice is actually talking, which is what a
+                # subtitle should stay on screen for.
                 "seconds": round(need, 3),
+                "spoken_s": round(_num(line.get("seconds")), 3),
                 "story_time": story_time,
                 "spoiler_ceiling": ceiling,
                 "wav": line.get("wav"),

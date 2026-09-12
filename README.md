@@ -32,9 +32,9 @@ needed.
 | 6 | `index` | Keyframes and CLIP embeddings, restricted to relevant regions | Built |
 | 7 | `narrate` | Piper text to speech per segment, cached by text hash | Built |
 | 8 | `select` | Score and pick shots for each narration segment | Built |
-| 9 | `render` | ffmpeg assembles the final video, stream-copying the source | Planned |
+| 9 | `render` | ffmpeg assembles the final video from the original | Built |
 
-Stages 1 to 8 are complete. Stage 9 is written and awaiting its first run.
+All nine stages are complete and measured on a real film.
 
 The film is read exactly once, in stage 2. No full-film video proxy is written,
 because nothing downstream needs one: stage 6 indexes only the regions the
@@ -57,7 +57,8 @@ On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
 | `index` | 2:03 | |
 | `narrate` | 1:14 | |
 | `select` | 0:00 | |
-| Total | 16:48 | $2.04 |
+| `render` | 7:12 | |
+| Total | 24:00 | $2.04 |
 
 Reading the film is effectively the entire cost, and it is unavoidable. Scale by
 your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
@@ -150,6 +151,7 @@ Each stage runs on its own for debugging.
 .\.venv\Scripts\python.exe analyze.py index    "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py narrate  "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py select   "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe analyze.py render   "D:\films\movie.mkv"
 ```
 
 ### Useful flags
@@ -249,6 +251,27 @@ moment being described, how comfortably their length fits the clip band, and
 penalties for reuse and darkness. The spoiler ceiling is a hard exclusion rather
 than a penalty, and a shot may be used only a limited number of times.
 
+### Rendering
+
+One ffmpeg invocation reads every clip straight out of the original film through
+the concat demuxer, with an in point and an out point per clip, so no
+intermediate files are written. The narration sits over the film's own audio,
+ducked underneath it by a sidechain compressor keyed on the narration itself.
+
+Stream copying the video is not the default, despite being much faster. A copy
+can only begin on a keyframe, but these clip boundaries come from shot detection
+and narration timing and fall wherever they fall. Copying would shift every clip
+to an earlier keyframe or emit corrupt leading frames. `--copy-video` is there if
+speed matters more than exact cuts.
+
+The audio track is chosen by ordinal among audio streams, not by original stream
+index, because the concat demuxer renumbers them. On a dual-audio film this is
+the difference between the intended language and the wrong one.
+
+Subtitles are timed to the spoken duration, not to the footage allotted to the
+line. The footage also covers the silence that follows, so using it would hold
+each caption on screen through the gap and butt it against the next.
+
 ### Caching
 
 Every stage reads and writes artifacts keyed by a content hash, so re-running a
@@ -330,6 +353,8 @@ Written to `cache/<source_id>/`.
 | `narration.json` | narrate | Spoken lines with measured durations and offsets |
 | `audio/` | narrate | One wav per distinct line, named by text hash |
 | `edl.json` | select | Edit decision list, clips chosen per line |
+| `final.mp4` | render | The finished recap video |
+| `subtitle.srt` | render | Narration subtitles, sidecar rather than burned in |
 | `timings.json` | all | Per-stage timings for every run |
 
 ## Project layout

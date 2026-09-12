@@ -26,7 +26,7 @@ from ..cache import Cache, StageOutcome, atomic_path, read_json, run_stage, writ
 from ..config import Settings
 
 STAGE = "render"
-VERSION = 1
+VERSION = 2  # bumped: subtitles timed to speech, not to footage
 
 FINAL_FILE = "final.mp4"
 SUBTITLE_FILE = "subtitle.srt"
@@ -56,11 +56,17 @@ def srt_timestamp(seconds: float) -> str:
 
 
 def write_subtitles(target: Path, timeline: list[dict], gap_s: float) -> int:
-    """Sidecar subtitles carrying the narration, not the film's dialogue."""
+    """Sidecar subtitles carrying the narration, not the film's dialogue.
+
+    Timed to the spoken duration, not to the footage allotted to the line. The
+    footage also covers the silence that follows, so using it would hold each
+    caption on screen through the gap and butt it against the next one.
+    """
     blocks = []
     for position, entry in enumerate(timeline, 1):
         start = _num(entry.get("start_s"))
-        end = start + _num(entry.get("seconds"))
+        spoken = _num(entry.get("spoken_s")) or _num(entry.get("seconds"))
+        end = start + spoken
         text = str(entry.get("narration") or "").strip()
         if not text:
             continue
