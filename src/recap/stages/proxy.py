@@ -1,17 +1,22 @@
-"""Stage 2, proxy generation, with scene detection fused into the same pass.
+"""Stage 2, the single full-film read.
 
-One decode of the source produces three things: the 480p analysis proxy, the raw
-scene change timestamps, and the 16 kHz mono wav. Sharing the decode matters
-because decoding a 2 hour film is the single most expensive operation in the
-pipeline on this hardware, and doing it twice would cost several minutes for
-nothing.
+One decode of the source produces the raw scene change timestamps and the 16 kHz
+mono wav. Sharing that decode matters because reading a 2 hour film is the single
+most expensive operation in the pipeline on this hardware, measured at about 12
+minutes, and doing it twice would double the largest cost in the budget.
 
-The original file is never touched again until the render stage, which
-stream-copies from it.
+No full-film video proxy is written by default. Encoding one was measured to add
+roughly 6 minutes on a 94 minute film while serving nothing downstream, because
+stage 6 indexes only the narrowed regions the script references and stage 9
+stream-copies the original. Pass ``--with-proxy`` to write one anyway, which is
+useful for seeing what the pipeline saw.
+
+The original file is otherwise untouched until the render stage.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -20,15 +25,15 @@ from ..cache import Cache, StageOutcome, run_stage
 from ..config import Settings
 
 STAGE = "proxy"
-VERSION = 1
+VERSION = 2  # bumped: bit depth normalisation and the reworked decoder ladder
 
 PROXY_FILE = "proxy.mp4"
 WAV_FILE = "proxy.wav"
 SCDET_FILE = "scdet.raw.txt"
 
 PARAM_NAMES = (
-    "proxy_height", "proxy_fps", "proxy_fps_threshold", "allow_qsv",
-    "x264_preset", "x264_crf", "qsv_quality", "audio_rate",
+    "write_proxy_video", "proxy_height", "proxy_fps", "proxy_fps_threshold",
+    "allow_qsv", "x264_preset", "x264_crf", "qsv_quality", "audio_rate",
     "detect_width", "scene_floor", "preferred_langs",
 )
 
@@ -62,20 +67,50 @@ def build_filter_graph(settings: Settings, target_height: int, source_fps: float
     the twenty second encoder probe on any film that opens on a static shot.
     Terminating the branch inside the graph removes the output stream entirely.
     """
-    chain = [f"scale=-2:{target_height}:flags=fast_bilinear"]
+    # format=yuv420p normalises the bit depth. A 10 bit source such as HEVC Main
+    # 10 arrives as yuv420p10le, and without it the proxy would be encoded at 10
+    # bit, which is slower to produce and pointless for retrieval work. Chroma
+    # is deliberately kept rather than converting to gray, because it lets scdet
+    # separate two scenes of similar brightness but different colour.
+    detect = (
+        f"scdet=t={settings.scene_floor},"
+        f"metadata=mode=select:key=lavfi.scd.time,"
+        f"metadata=mode=print:key=lavfi.scd.score:file={SCDET_FILE}:direct=1,"
+        f"nullsink"
+    )
+
+    if not settings.write_proxy_video:
+        # Lean pass. Scaling straight to the detection width is one operation
+        # instead of two, and no video is encoded at all.
+        #
+        # The kept branch exists only to give the graph a mapped output. ffmpeg
+        # rejects a filter_complex in which every branch ends in a sink, and the
+        # detection branch cannot be the mapped output because its select filter
+        # discards all non-cut frames, which would leave the output empty on any
+        # stretch of film without a cut.
+        #
+        # Only the first frame is passed. Feeding every frame to the null muxer
+        # made it complain about duplicate timestamps once per frame, which is
+        # over a hundred thousand lines of stderr on a feature film. One frame is
+        # enough to keep the output non-empty and silences it completely.
+        return (
+            f"[0:v]scale={settings.detect_width}:-2:flags=neighbor,format=yuv420p,"
+            f"split=2[kept][pdet];"
+            f"[kept]trim=end_frame=1[keep];"
+            f"[pdet]{detect}"
+        )
+
+    chain = [f"scale=-2:{target_height}:flags=fast_bilinear", "format=yuv420p"]
     # Leave 23.976 and 24 fps films untouched. Only reduce genuinely high frame
-    # rate sources, where the extra frames are wasted encode work.
+    # rate sources, where the extra frames are wasted encode work. Applied only
+    # in this branch, since without an encode there is nothing to save.
     if source_fps and source_fps > settings.proxy_fps_threshold:
         chain.append(f"fps={settings.proxy_fps}")
     prepared = ",".join(chain)
 
     return (
         f"[0:v]{prepared},split=2[penc][pdet];"
-        f"[pdet]scale={settings.detect_width}:-2:flags=neighbor,"
-        f"scdet=t={settings.scene_floor},"
-        f"metadata=mode=select:key=lavfi.scd.time,"
-        f"metadata=mode=print:key=lavfi.scd.score:file={SCDET_FILE}:direct=1,"
-        f"nullsink"
+        f"[pdet]scale={settings.detect_width}:-2:flags=neighbor,{detect}"
     )
 
 
@@ -106,9 +141,15 @@ def build_command(
     args += ["-i", str(source.resolve())]
     args += ["-filter_complex", build_filter_graph(settings, target_height, source_fps)]
 
-    # Output 1, the analysis proxy. The detection branch needs no output of its
-    # own because it ends in nullsink inside the filter graph.
-    args += ["-map", "[penc]", *plan.video_args, "-an", "-sn", "-dn", proxy_name]
+    # Output 1. Either the 480p proxy, or a discarded stream that exists purely
+    # to give the filter graph a mapped output.
+    if settings.write_proxy_video:
+        args += ["-map", "[penc]", *plan.video_args, "-an", "-sn", "-dn", proxy_name]
+    else:
+        # The destination is the platform null device, not "-". A dash means
+        # stdout, which is already carrying the machine readable progress
+        # stream, and the two collide and hang the run.
+        args += ["-map", "[keep]", "-an", "-sn", "-dn", "-f", "null", os.devnull]
     # Output 2, mono speech audio for the recognition fallback.
     if audio_index is not None:
         args += [
@@ -165,7 +206,11 @@ def run(
     params["audio_index"] = audio.index if audio else None
     params["target_height"] = target_height
 
-    artifacts = [PROXY_FILE, SCDET_FILE] + ([WAV_FILE] if audio else [])
+    artifacts = [SCDET_FILE]
+    if settings.write_proxy_video:
+        artifacts.append(PROXY_FILE)
+    if audio:
+        artifacts.append(WAV_FILE)
 
     def work() -> dict:
         def build(plan: probe.ProxyPlan, seconds: int) -> list[str]:
@@ -179,7 +224,7 @@ def run(
                 limit_seconds=seconds,
             )
 
-        plans = probe.encoder_ladder(settings)
+        plans = probe.encoder_ladder(settings, video.codec)
         if not quiet:
             print(f"  probing {len(plans)} encoder configuration(s) against this file")
         plan, attempts = probe.pick_plan(source, plans, build, cache.dir)
@@ -196,29 +241,34 @@ def run(
             proxy_name=PROXY_FILE,
             wav_name=WAV_FILE,
         )
+        label = "encoding proxy" if settings.write_proxy_video else "reading film"
         ffmpeg.run_with_progress(
             args,
             cwd=cache.dir,
             total_seconds=duration,
-            on_progress=None if quiet else _progress_printer("encoding proxy"),
+            on_progress=None if quiet else _progress_printer(label),
         )
         if not quiet:
             sys.stdout.write("\r" + " " * 70 + "\r")
             sys.stdout.flush()
 
-        proxy_probe = ffmpeg.probe(cache.path(PROXY_FILE))
-        proxy_video = (ffmpeg.streams(proxy_probe, "video") or [None])[0]
+        proxy_video = None
+        if settings.write_proxy_video:
+            proxy_probe = ffmpeg.probe(cache.path(PROXY_FILE))
+            proxy_video = (ffmpeg.streams(proxy_probe, "video") or [None])[0]
 
         return {
             "plan": plan.name,
             "plan_attempts": attempts,
-            "proxy": PROXY_FILE,
+            "proxy": PROXY_FILE if settings.write_proxy_video else None,
             "wav": WAV_FILE if audio else None,
             "scdet_raw": SCDET_FILE,
             "width": proxy_video.width if proxy_video else None,
             "height": proxy_video.height if proxy_video else None,
             "fps": round(proxy_video.fps, 3) if proxy_video and proxy_video.fps else None,
-            "duration_s": round(ffmpeg.duration_seconds(proxy_probe), 3),
+            # Always the source runtime, so stage 3 has a timeline to work from
+            # whether or not a proxy video was written.
+            "duration_s": round(duration, 3),
             "source_duration_s": round(duration, 3),
             # Transport streams often start at a non-zero timestamp. Later stages
             # subtract this so proxy time and source time stay aligned, without
@@ -230,14 +280,17 @@ def run(
         }
 
     def summarize(meta: dict) -> str:
-        size_mb = cache.path(PROXY_FILE).stat().st_size / 1e6 if cache.path(PROXY_FILE).is_file() else 0
-        bits = [f"{meta.get('width')}x{meta.get('height')}"]
-        if meta.get("fps"):
-            bits.append(f"{meta['fps']:g}fps")
-        bits.append(str(meta.get("plan")))
-        bits.append(f"{size_mb:.0f}MB")
-        if not meta.get("wav"):
-            bits.append("no audio")
+        bits = [str(meta.get("plan"))]
+        if meta.get("proxy"):
+            proxy_file = cache.path(PROXY_FILE)
+            size_mb = proxy_file.stat().st_size / 1e6 if proxy_file.is_file() else 0
+            detail = f"proxy {meta.get('width')}x{meta.get('height')}"
+            if meta.get("fps"):
+                detail += f"@{meta['fps']:g}"
+            bits.append(f"{detail}, {size_mb:.0f}MB")
+        else:
+            bits.append("no proxy video")
+        bits.append("wav" if meta.get("wav") else "no audio")
         return ", ".join(bits)
 
     return run_stage(

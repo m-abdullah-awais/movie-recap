@@ -124,16 +124,45 @@ class ProxyPlan:
     note: str = ""
 
 
-def encoder_ladder(settings: Settings) -> list[ProxyPlan]:
+# Quick Sync decoders, keyed by the codec name ffprobe reports.
+QSV_DECODERS = {
+    "hevc": "hevc_qsv",
+    "h264": "h264_qsv",
+    "vp9": "vp9_qsv",
+    "av1": "av1_qsv",
+    "mpeg2video": "mpeg2_qsv",
+    "vc1": "vc1_qsv",
+    "mjpeg": "mjpeg_qsv",
+}
+
+
+def encoder_ladder(settings: Settings, source_codec: str | None = None) -> list[ProxyPlan]:
     """Candidate commands in preference order.
 
-    Hardware decode is requested with an ``nv12`` output format so frames are
-    downloaded to system memory automatically and the filter graph stays in
-    software. Mixing Quick Sync surfaces with ``hwdownload`` mid graph is fragile
-    across driver versions, and filtering at 480p costs almost nothing anyway.
-    The expensive part, decoding full resolution video, is what gets accelerated.
+    Hardware decoding is requested by naming the Quick Sync decoder explicitly
+    rather than through ``-hwaccel qsv -hwaccel_output_format nv12``. That
+    hwaccel form only works for 8 bit video: a 10 bit source such as HEVC Main
+    10 decodes to ``p010``, which cannot be represented as ``nv12``, so the
+    decoder fails to initialise and the whole rung is discarded. Naming the
+    decoder lets it pick its own output format, and the filter graph normalises
+    the depth afterwards.
+
+    Keeping frames on the GPU with ``-hwaccel_output_format qsv`` and scaling
+    via ``vpp_qsv`` would avoid downloading full resolution frames entirely, but
+    it fails on this hardware with a Direct3D texture allocation error, so it is
+    not offered.
     """
-    qsv_decode = ["-hwaccel", "qsv", "-hwaccel_output_format", "nv12"]
+    decoder = QSV_DECODERS.get((source_codec or "").lower())
+    qsv_decode = ["-c:v", decoder] if decoder else None
+    plans: list[ProxyPlan] = []
+
+    if not settings.write_proxy_video:
+        # No video is encoded, so the only choice left is the decoder.
+        if settings.allow_qsv and qsv_decode:
+            plans.append(ProxyPlan(f"{decoder}", qsv_decode, [], "hardware decode"))
+        plans.append(ProxyPlan("sw-decode", [], [], "software decode"))
+        return plans
+
     x264 = [
         "-c:v", "libx264",
         "-preset", settings.x264_preset,
@@ -147,11 +176,10 @@ def encoder_ladder(settings: Settings) -> list[ProxyPlan]:
         "-pix_fmt", "nv12",
     ]
 
-    plans: list[ProxyPlan] = []
-    if settings.allow_qsv:
-        plans.append(ProxyPlan("qsv-decode+qsv-encode", qsv_decode, qsv_encode,
+    if settings.allow_qsv and qsv_decode:
+        plans.append(ProxyPlan(f"{decoder}+qsv-encode", qsv_decode, qsv_encode,
                                "hardware decode and hardware encode"))
-        plans.append(ProxyPlan("qsv-decode+x264", qsv_decode, x264,
+        plans.append(ProxyPlan(f"{decoder}+x264", qsv_decode, x264,
                                "hardware decode, software encode"))
     plans.append(ProxyPlan("sw-decode+x264", [], x264, "software decode and encode"))
     return plans

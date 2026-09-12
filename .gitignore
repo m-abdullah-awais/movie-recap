@@ -16,8 +16,12 @@ claude-rules.md
 
 # Pipeline working data
 cache/
-input/
 output/
+
+# Drop movies into input/. The folder itself is tracked so it exists after a
+# clone, but its contents never are.
+input/*
+!input/README.md
 
 # Environment
 .env

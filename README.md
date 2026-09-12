@@ -25,7 +25,7 @@ needed.
 | # | Stage | What it does | Status |
 | --- | --- | --- | --- |
 | 1 | `ingest` | Extract dialogue from embedded subtitles, a sidecar file, or speech recognition | Built |
-| 2 | `proxy` | One ffmpeg pass producing a 480p proxy and a 16 kHz mono wav | Built |
+| 2 | `proxy` | One ffmpeg read of the film producing scene data and a 16 kHz mono wav | Built |
 | 3 | `scenemap` | Coarse shot boundaries across the whole film | Built |
 | 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Planned |
 | 5 | `script` | Claude turns the story into narration segments with visual queries | Planned |
@@ -38,15 +38,40 @@ Stages 1 to 3 are complete and are the subject of this release. The remaining
 stages are deliberately unwritten until real timings from a full length film
 confirm the approach is viable on the target hardware.
 
-All analysis runs on the proxy. The original file is read again only at render
-time, where it is stream-copied rather than re-encoded.
+The film is read exactly once, in stage 2. No full-film video proxy is written,
+because nothing downstream needs one: stage 6 indexes only the regions the
+narration script actually references, and stage 9 stream-copies the original.
+Pass `--with-proxy` to write a 480p copy anyway, which is useful for seeing what
+the pipeline saw.
+
+## Measured performance
+
+On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
+94 minute HEVC Main 10 1080p film carrying English subtitles.
+
+| Stage | Time |
+| --- | --- |
+| `ingest` | 0:01 |
+| `proxy` | 7:13 |
+| `scenemap` | 0:00 |
+| Total | 7:14, or 13x realtime |
+
+Reading the film is effectively the entire cost, and it is unavoidable. Scale by
+your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
+roughly 25 percent slower. Writing a 480p proxy as well adds about 6 minutes,
+which is why it is off by default.
+
+Two approaches were measured and rejected. Keeping frames on the GPU through
+`vpp_qsv` would avoid downloading them, but fails on this hardware with a Direct3D
+texture allocation error. Skipping B-frames to cut decode work leaves only 9 of
+every 720 frames on this film, far too coarse for shot detection.
 
 ## Requirements
 
 - Windows with PowerShell
 - `ffmpeg` and `ffprobe` on `PATH`, or `FFMPEG` and `FFPROBE` pointing at them
 - `uv` on `PATH`
-- Roughly 200 MB of disk for the toolchain, plus about 1 GB per film analysed
+- Roughly 200 MB of disk for the toolchain, plus about 200 MB per film analysed
 
 Python 3.11 is required and is installed by the setup script. The system Python is
 not used, because `ctranslate2` publishes no wheels for Python 3.14.
@@ -125,9 +150,10 @@ Each stage runs on its own for debugging.
 | --- | --- |
 | `--force` | Ignore the cache and recompute every stage |
 | `--force-stage scenemap` | Recompute one stage and leave the others cached |
-| `--proxy-height 360` | Build a smaller proxy, which is faster but coarser |
+| `--with-proxy` | Also write a full-film 480p proxy, for inspection only |
+| `--proxy-height 360` | Height of that proxy when `--with-proxy` is used |
 | `--threshold 6` | Lower the scene change threshold to detect more cuts |
-| `--no-qsv` | Disable Quick Sync and encode entirely in software |
+| `--no-qsv` | Disable Quick Sync and decode entirely in software |
 | `--json` | Emit machine readable output instead of a table |
 | `--quiet` | Suppress progress output |
 
@@ -164,20 +190,39 @@ No stage crashes where it can degrade instead.
 - Bitmap subtitles are detected and skipped, because they carry images not text
 - A subtitle track covering too little of the runtime is rejected and the next
   candidate is tried, which catches mislabelled forced and commentary tracks
-- Quick Sync failure falls back to software encoding
+- Quick Sync failure falls back to software decoding
 - Missing scene data falls back to a uniform shot grid
+- A speech model that cannot be downloaded is reported clearly, and the stages
+  that do not need dialogue still complete
 
 ### Hardware acceleration
 
-The proxy pass uses Intel Quick Sync for decoding and encoding when it is
-available, falling back to software automatically. Quick Sync is a fixed-function
-media engine rather than GPU compute, and no AI work touches it. On the target
-hardware, a 2017 low-power laptop CPU, software encoding alone would consume the
-entire time budget.
+Stage 2 decodes through Intel Quick Sync when it is available, falling back to
+software automatically. Quick Sync is a fixed-function media engine rather than
+GPU compute, and no AI work touches it.
 
-Because Quick Sync decode support varies by codec and inputs are arbitrary, the
-working command is discovered per file by running a short real encode rather than
-by trusting the encoder list.
+The Quick Sync decoder is named explicitly per codec rather than requested
+through `-hwaccel`. The `-hwaccel` form needs an output pixel format declared up
+front, and the obvious choice of `nv12` is 8 bit only, so a 10 bit source such as
+HEVC Main 10 fails to initialise and silently falls back to software. Naming the
+decoder lets it choose its own format, and the filter graph normalises the bit
+depth afterwards.
+
+Because support varies by codec and inputs are arbitrary, the working command is
+still discovered per file by running a short real pass rather than by trusting
+the encoder list.
+
+### Scene detection
+
+Detection runs during the single read, on a hard downscale to 160 pixels wide,
+which makes it almost free. Frame differences survive that aggressive a
+downsample. Chroma is kept rather than converting to grayscale, so two scenes of
+similar brightness but different colour still separate.
+
+Detection uses a permissive floor and records every candidate cut's score.
+Stage 3 then applies your threshold to those scores. That is what makes
+`--threshold` cheap: retuning it re-runs stage 3 in under a second instead of
+re-reading the film.
 
 ## Cache artifacts
 
@@ -187,9 +232,9 @@ Written to `cache/<source_id>/`.
 | --- | --- | --- |
 | `transcript.json` | ingest | Dialogue cues, chosen source, coverage statistics |
 | `dialogue.srt` | ingest | Normalised subtitles as extracted |
-| `proxy.mp4` | proxy | 480p analysis proxy |
+| `proxy.mp4` | proxy | 480p copy, only when `--with-proxy` is used |
 | `proxy.wav` | proxy | 16 kHz mono audio for speech recognition |
-| `scdet.raw.txt` | proxy | Raw scene change timestamps |
+| `scdet.raw.txt` | proxy | Candidate scene changes with their scores |
 | `scenes.json` | scenemap | Shot list with statistics |
 | `timings.json` | all | Per-stage timings for every run |
 

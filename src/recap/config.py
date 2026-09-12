@@ -30,6 +30,37 @@ CACHE_ROOT = ROOT / "cache"
 MODELS_DIR = ROOT / ".models"
 VENV_DIR = ROOT / ".venv"
 
+# Drop-in folder. A movie placed here is found without a path being given.
+INPUT_DIR = ROOT / "input"
+
+# Containers worth offering as a drop-in. This list only decides what counts as
+# a candidate in the input folder. An explicitly named file is never filtered by
+# extension, because ffmpeg detects the format from content.
+MEDIA_EXTS = frozenset(
+    {
+        ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".wmv", ".flv",
+        ".mpg", ".mpeg", ".m2ts", ".ts", ".vob", ".ogv", ".3gp", ".divx",
+    }
+)
+
+
+def discover_input(input_dir: Path | None = None) -> list[Path]:
+    """Movies sitting in the drop-in folder, largest first.
+
+    Sorted by size because a stray sample or trailer alongside the feature is
+    always the smaller file, which makes the ordering useful when reporting
+    several candidates.
+    """
+    folder = input_dir or INPUT_DIR
+    if not folder.is_dir():
+        return []
+    found = [
+        item
+        for item in folder.iterdir()
+        if item.is_file() and item.suffix.lower() in MEDIA_EXTS
+    ]
+    return sorted(found, key=lambda p: p.stat().st_size, reverse=True)
+
 
 def contain_environment() -> None:
     """Force every redirected location into the project directory.
@@ -59,7 +90,15 @@ class Settings:
     """Tunables. Every value here feeds the cache key of the stage that uses it,
     so changing one invalidates only the affected stage."""
 
-    # Stage 2, proxy
+    # Stage 2, the single full-film read.
+    #
+    # By default no full-film video proxy is written. Measured on a 94 minute
+    # HEVC 10 bit film on this hardware, decoding costs about 10 minutes and is
+    # unavoidable, while encoding a 480p proxy on top added a further 6. Nothing
+    # after stage 3 needs a full-film proxy: stage 6 indexes only the narrowed
+    # regions the script actually references, and stage 9 stream-copies the
+    # original. Enable it for debugging, or to eyeball what the pipeline saw.
+    write_proxy_video: bool = False
     proxy_height: int = 480
     proxy_fps: int = 24
     # An fps filter is only inserted above this rate, so 23.976 and 24 fps films

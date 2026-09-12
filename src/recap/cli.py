@@ -35,18 +35,30 @@ ALL_STAGES = ("ingest", "proxy", "scenemap")
 
 
 # Shared option definitions, declared once so every command stays consistent.
-MovieArg = typer.Argument(..., help="Path to the movie. Any container ffmpeg can read.")
+MovieArg = typer.Argument(
+    None,
+    help="Path to the movie. Omit it to use the single movie in the input folder.",
+)
 ForceOpt = typer.Option(False, "--force", help="Ignore the cache and recompute every stage.")
 ForceStageOpt = typer.Option(None, "--force-stage", help="Recompute only these stages.")
 HeightOpt = typer.Option(None, "--proxy-height", help="Proxy height in pixels. Default 480.")
 ThresholdOpt = typer.Option(None, "--threshold", help="Scene change threshold, 0 to 100. Default 8.")
-NoQsvOpt = typer.Option(False, "--no-qsv", help="Disable Quick Sync and encode in software.")
+NoQsvOpt = typer.Option(False, "--no-qsv", help="Disable Quick Sync and decode in software.")
+WithProxyOpt = typer.Option(
+    False, "--with-proxy",
+    help="Also write a full-film 480p proxy. Slower, and only useful for inspection.",
+)
 CacheDirOpt = typer.Option(None, "--cache-dir", help="Override the cache root.")
 JsonOpt = typer.Option(False, "--json", help="Emit machine readable output.")
 QuietOpt = typer.Option(False, "--quiet", "-q", help="Suppress progress output.")
 
 
-def _settings(height: int | None, threshold: float | None, no_qsv: bool) -> Settings:
+def _settings(
+    height: int | None,
+    threshold: float | None,
+    no_qsv: bool,
+    with_proxy: bool = False,
+) -> Settings:
     changes: dict[str, object] = {}
     if height is not None:
         changes["proxy_height"] = height
@@ -54,6 +66,8 @@ def _settings(height: int | None, threshold: float | None, no_qsv: bool) -> Sett
         changes["scene_threshold"] = threshold
     if no_qsv:
         changes["allow_qsv"] = False
+    if with_proxy:
+        changes["write_proxy_video"] = True
     return dataclasses.replace(Settings(), **changes) if changes else Settings()
 
 
@@ -61,12 +75,43 @@ def _forced(stage: str, force_all: bool, force_stages: list[str] | None) -> bool
     return force_all or (bool(force_stages) and stage in force_stages)
 
 
-def _open(movie: Path, cache_dir: Path | None) -> tuple[Cache, dict, float]:
-    movie = movie.expanduser()
-    if not movie.is_file():
-        typer.secho(f"not a file: {movie}", fg=typer.colors.RED, err=True)
+def _resolve_movie(movie: Path | None) -> Path:
+    """Turn an optional argument into a real file.
+
+    With no argument, the drop-in input folder is used. Several movies there is
+    treated as an error rather than resolved by guessing, because picking the
+    wrong one costs minutes of encoding before the mistake becomes obvious.
+    """
+    if movie is not None:
+        movie = movie.expanduser()
+        if not movie.is_file():
+            typer.secho(f"not a file: {movie}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(2)
+        return movie
+
+    found = config.discover_input()
+    if len(found) == 1:
+        typer.secho(f"using {found[0].name} from the input folder", fg=typer.colors.CYAN)
+        return found[0]
+
+    if not found:
+        typer.secho(
+            f"no movie found. Put one in {config.INPUT_DIR}, or pass its path as an argument.",
+            fg=typer.colors.RED, err=True,
+        )
         raise typer.Exit(2)
 
+    typer.secho(
+        f"{len(found)} movies are in the input folder, so name the one you want:",
+        fg=typer.colors.RED, err=True,
+    )
+    for item in found:
+        typer.secho(f'  analyze.py all "input/{item.name}"', err=True)
+    raise typer.Exit(2)
+
+
+def _open(movie: Path | None, cache_dir: Path | None) -> tuple[Path, Cache, dict, float]:
+    movie = _resolve_movie(movie)
     probe_data = ffmpeg.probe(movie)
     if not ffmpeg.streams(probe_data, "video"):
         typer.secho(f"{movie.name} has no video stream", fg=typer.colors.RED, err=True)
@@ -74,7 +119,7 @@ def _open(movie: Path, cache_dir: Path | None) -> tuple[Cache, dict, float]:
 
     sid = source_id(movie)
     cache = Cache(cache_dir or CACHE_ROOT, sid, movie)
-    return cache, probe_data, ffmpeg.duration_seconds(probe_data)
+    return movie, cache, probe_data, ffmpeg.duration_seconds(probe_data)
 
 
 def _validate_stages(names: list[str] | None) -> list[str] | None:
@@ -149,20 +194,21 @@ def _run_ingest(cache, movie, probe_data, settings, report, *, force_all, force_
 
 @app.command("all")
 def run_all(
-    movie: Path = MovieArg,
+    movie: Optional[Path] = MovieArg,
     force: bool = ForceOpt,
     force_stage: Optional[list[str]] = ForceStageOpt,
     proxy_height: Optional[int] = HeightOpt,
     threshold: Optional[float] = ThresholdOpt,
     no_qsv: bool = NoQsvOpt,
+    with_proxy: bool = WithProxyOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     json: bool = JsonOpt,
     quiet: bool = QuietOpt,
 ):
     """Run ingest, proxy, and scenemap, then print per stage timings."""
     force_stage = _validate_stages(force_stage)
-    settings = _settings(proxy_height, threshold, no_qsv)
-    cache, probe_data, duration = _open(movie, cache_dir)
+    settings = _settings(proxy_height, threshold, no_qsv, with_proxy)
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
     report = Report(movie, duration)
 
     if not quiet:
@@ -225,14 +271,14 @@ def run_all(
 
 @app.command("ingest")
 def ingest_stage(
-    movie: Path = MovieArg,
+    movie: Optional[Path] = MovieArg,
     force: bool = ForceOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     quiet: bool = QuietOpt,
 ):
     """Stage 1 only. Extract dialogue from subtitles or speech recognition."""
     settings = Settings()
-    cache, probe_data, duration = _open(movie, cache_dir)
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
     report = Report(movie, duration)
     _run_ingest(cache, movie, probe_data, settings, report,
                 force_all=force, force_stages=None, quiet=quiet)
@@ -241,17 +287,18 @@ def ingest_stage(
 
 @app.command("proxy")
 def proxy_stage(
-    movie: Path = MovieArg,
+    movie: Optional[Path] = MovieArg,
     force: bool = ForceOpt,
     proxy_height: Optional[int] = HeightOpt,
     threshold: Optional[float] = ThresholdOpt,
     no_qsv: bool = NoQsvOpt,
+    with_proxy: bool = WithProxyOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     quiet: bool = QuietOpt,
 ):
-    """Stage 2 only. Build the 480p proxy, the wav, and the raw scene data."""
-    settings = _settings(proxy_height, threshold, no_qsv)
-    cache, probe_data, duration = _open(movie, cache_dir)
+    """Stage 2 only. Read the film once for the wav and the raw scene data."""
+    settings = _settings(proxy_height, threshold, no_qsv, with_proxy)
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
     report = Report(movie, duration)
     report.add(proxy.run(cache, movie, probe_data, settings, force=force, quiet=quiet))
     print("\n" + report.render())
@@ -259,7 +306,7 @@ def proxy_stage(
 
 @app.command("scenemap")
 def scenemap_stage(
-    movie: Path = MovieArg,
+    movie: Optional[Path] = MovieArg,
     force: bool = ForceOpt,
     threshold: Optional[float] = ThresholdOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
@@ -267,7 +314,7 @@ def scenemap_stage(
 ):
     """Stage 3 only. Build the shot map from the scene data stage 2 emitted."""
     settings = _settings(None, threshold, False)
-    cache, probe_data, duration = _open(movie, cache_dir)
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
     meta_file = cache.path("proxy.meta.json")
     if not meta_file.is_file():
         typer.secho("the proxy stage has not run for this file yet", fg=typer.colors.RED, err=True)
@@ -279,16 +326,12 @@ def scenemap_stage(
 
 @app.command()
 def info(
-    movie: Path = MovieArg,
+    movie: Optional[Path] = MovieArg,
     cache_dir: Optional[Path] = CacheDirOpt,
     json: bool = JsonOpt,
 ):
     """Probe a file and report its streams. Does no work and writes nothing."""
-    movie = movie.expanduser()
-    if not movie.is_file():
-        typer.secho(f"not a file: {movie}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(2)
-
+    movie = _resolve_movie(movie)
     probe_data = ffmpeg.probe(movie)
     settings = Settings()
     duration = ffmpeg.duration_seconds(probe_data)

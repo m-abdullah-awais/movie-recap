@@ -10,6 +10,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -109,7 +111,23 @@ def run_with_progress(
         errors="replace",
         bufsize=1,
     )
-    assert proc.stdout is not None
+    assert proc.stdout is not None and proc.stderr is not None
+
+    # stderr must be drained while stdout is being read, not afterwards. Some
+    # configurations emit a warning per frame, which is well over a hundred
+    # thousand lines for a feature film. That fills the stderr pipe buffer,
+    # ffmpeg blocks writing to it, stops producing progress on stdout, and the
+    # read loop below waits forever. Only the tail is kept, since that is all an
+    # error message needs.
+    tail: deque[str] = deque(maxlen=40)
+
+    def drain() -> None:
+        for line in proc.stderr:  # type: ignore[union-attr]
+            tail.append(line.rstrip())
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+
     try:
         for line in proc.stdout:
             key, _, value = line.strip().partition("=")
@@ -121,13 +139,12 @@ def run_with_progress(
                 on_progress(done, total_seconds)
     finally:
         proc.stdout.close()
-        stderr = proc.stderr.read() if proc.stderr else ""
-        if proc.stderr:
-            proc.stderr.close()
         code = proc.wait()
+        reader.join(timeout=5)
+        proc.stderr.close()
 
     if code != 0:
-        raise FfmpegError("ffmpeg failed", full, stderr, code)
+        raise FfmpegError("ffmpeg failed", full, "\n".join(tail), code)
 
 
 def probe(path: Path) -> dict:

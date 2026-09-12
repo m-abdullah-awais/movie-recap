@@ -215,9 +215,40 @@ echo  would be chosen, and whether speech recognition is needed.
 echo  This writes nothing and takes about a second.
 echo.
 echo  Any container ffmpeg can read works, such as mp4, mkv, avi,
-echo  or mov. Drag the file onto this window to paste its path.
+echo  or mov.
 echo.
 if not "%MOVIE%"=="" goto have_movie
+
+rem Prefer the drop-in folder. Counting the candidates here means a single
+rem movie in input needs no path at all, while several are reported rather
+rem than guessed between.
+set "FOUND="
+set "COUNT=0"
+if not exist "%ROOT%\input" goto ask_movie
+for %%F in ("%ROOT%\input\*.mkv" "%ROOT%\input\*.mp4" "%ROOT%\input\*.m4v" "%ROOT%\input\*.avi" "%ROOT%\input\*.mov" "%ROOT%\input\*.webm" "%ROOT%\input\*.wmv" "%ROOT%\input\*.flv" "%ROOT%\input\*.mpg" "%ROOT%\input\*.mpeg" "%ROOT%\input\*.m2ts" "%ROOT%\input\*.ts") do call :note_candidate "%%~fF"
+
+if "%COUNT%"=="0" goto no_input
+if "%COUNT%"=="1" goto one_input
+echo   %COUNT% movies are in the input folder, so it is not clear which
+echo   one you mean. Give the path, or leave only one file in there.
+echo.
+goto ask_movie
+
+:one_input
+set "MOVIE=%FOUND%"
+echo   Found one movie in the input folder:
+echo     %MOVIE%
+echo.
+call :confirm "Use this one"
+if errorlevel 1 goto ask_movie
+goto have_movie
+
+:no_input
+echo   The input folder is empty.
+echo.
+echo   Put the movie in:  %ROOT%\input
+echo   then run this script again, and no path will be needed.
+echo.
 
 :ask_movie
 set "MOVIE="
@@ -255,8 +286,10 @@ echo  Runs all three stages on the film and prints per-stage timings.
 echo  This is the number that decides whether the remaining stages
 echo  are feasible as designed.
 echo.
-echo  Expect roughly 3 to 6 minutes for a 2 hour film if Quick Sync
-echo  engages, or 15 to 25 minutes if it falls back to software.
+echo  Measured on a 94 minute HEVC film on this machine: 7 minutes
+echo  14 seconds, which is 13 times realtime. Scale that by your
+echo  film's runtime. Software decode is roughly 25 percent slower.
+echo  Nearly all of it is the one unavoidable read of the film.
 echo  Watch the percentage during the proxy stage.
 echo.
 echo  If the film has no usable subtitles, a 250 MB speech model is
@@ -376,6 +409,14 @@ echo.
 echo --------------------------------------------------------------
 echo  %~1
 echo --------------------------------------------------------------
+exit /b 0
+
+:note_candidate
+rem Called once per matching file. A for loop over a pattern that matches
+rem nothing still yields nothing, so COUNT staying at zero means an empty
+rem folder.
+set /a COUNT+=1
+set "FOUND=%~1"
 exit /b 0
 
 :confirm
