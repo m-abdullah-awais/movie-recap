@@ -91,7 +91,9 @@ mentioned, hinted at, or implied anywhere in this act:
 # Narration is spoken, so anything that cannot be pronounced is stripped rather
 # than read out as punctuation.
 _UNSPEAKABLE_RE = re.compile(r"[\[\]{}<>*_#`|]")
-_DASH_RE = re.compile(r"\s*[—–]\s*")
+# The characters are written as escapes so that no literal em or en dash
+# appears anywhere in this project, which is a standing rule here.
+_DASH_RE = re.compile("\s*[\u2014\u2013]\s*")
 _WS_RE = re.compile(r"\s+")
 
 
