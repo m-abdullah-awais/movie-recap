@@ -33,8 +33,10 @@ STAGE = "render"
 VERSION = 6  # bumped: gap at the narration rate, final video written atomically
 
 FINAL_FILE = "final.mp4"
-# Written here first, then moved into place. See the note in run().
-FINAL_TMP = "final.mp4.part"
+# Written here first, then moved into place. See the note in run(). The .mp4
+# extension is kept because ffmpeg picks the output container from it, and a
+# name ending in .part makes it refuse to choose a muxer at all.
+FINAL_TMP = "final.partial.mp4"
 SUBTITLE_FILE = "subtitle.srt"
 CLIPLIST_FILE = "clips.concat.txt"
 NARRATION_WAV = "narration_track.wav"
