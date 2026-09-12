@@ -28,13 +28,13 @@ needed.
 | 2 | `proxy` | One ffmpeg read of the film producing scene data and a 16 kHz mono wav | Built |
 | 3 | `scenemap` | Coarse shot boundaries across the whole film | Built |
 | 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
-| 5 | `script` | Claude turns the story into narration segments with visual queries | Planned |
+| 5 | `script` | Claude turns the story into narration segments with visual queries | Built |
 | 6 | `index` | Shot detection and CLIP embedding, restricted to relevant regions | Planned |
 | 7 | `narrate` | Piper text to speech per segment, cached by text hash | Planned |
 | 8 | `select` | Score and pick shots for each narration segment | Planned |
 | 9 | `render` | ffmpeg assembles the final video, stream-copying the source | Planned |
 
-Stages 1 to 4 are complete. The remaining stages are built one at a time, each
+Stages 1 to 5 are complete. The remaining stages are built one at a time, each
 measured on a real film before the next begins.
 
 The film is read exactly once, in stage 2. No full-film video proxy is written,
@@ -54,7 +54,8 @@ On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
 | `proxy` | 7:13 | |
 | `scenemap` | 0:00 | |
 | `story` | 3:44 | $1.58 |
-| Total | 10:58 | $1.58 |
+| `script` | 2:33 | $0.46 |
+| Total | 13:31 | $2.04 |
 
 Reading the film is effectively the entire cost, and it is unavoidable. Scale by
 your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
@@ -143,6 +144,7 @@ Each stage runs on its own for debugging.
 .\.venv\Scripts\python.exe analyze.py proxy    "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py scenemap "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py story    "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe analyze.py script   "D:\films\movie.mkv"
 ```
 
 ### Useful flags
@@ -178,6 +180,22 @@ Calls use `--system-prompt`, which replaces the default system prompt outright
 and keeps this project's own memory files out of an analysis call. Flags stay
 identical between calls so each one after the first reuses the same prompt cache
 prefix. That is the difference between five cents and twenty-five cents a call.
+
+### Writing the script
+
+Stage 5 writes one Claude call per act, in order rather than in parallel, because
+each act's narration has to follow on from the last without repeating it. The
+word budget is shared out by how much of the film each act covers.
+
+Spoiler control is computed in Python, not asked of the model. Each segment
+carries a ceiling on how late in the film its footage may come from, set by the
+next twist the narration has not reached yet and capped a fixed distance ahead of
+the current position. Without the cap, an early segment could be backed by a shot
+from the finale.
+
+The script is written before any footage is chosen. That is what makes
+synchronisation automatic: once a line has been spoken and measured, its duration
+says exactly how much video must sit behind it.
 
 ### Caching
 
@@ -251,6 +269,8 @@ Written to `cache/<source_id>/`.
 | `scenes.json` | scenemap | Shot list with statistics |
 | `story.json` | story | Cast, acts, beats, setups and payoffs, twists |
 | `story_calls/` | story | One cached response per Claude call |
+| `script.json` | script | Narration segments with visual queries and spoiler ceilings |
+| `script_calls/` | script | One cached response per Claude call |
 | `timings.json` | all | Per-stage timings for every run |
 
 ## Project layout

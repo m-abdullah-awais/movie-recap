@@ -138,6 +138,19 @@ class Settings:
     claude_concurrency: int = 3
     claude_timeout_s: int = 300
 
+    # Stage 5, script.
+    #
+    # A 10 to 20 minute recap at a normal narration pace is roughly 1500 to 3000
+    # words. The target sits mid-range. Speech rate is only used to predict
+    # length here; stage 7 replaces the estimate with the real measured duration
+    # of each rendered line.
+    script_target_words: int = 2200
+    script_words_per_minute: int = 150
+    # How far ahead of the narration's current position footage may be drawn
+    # from. Without a cap, a segment early in the recap could be backed by a
+    # shot from the finale.
+    spoiler_lookahead_s: float = 180.0
+
     # Stage 1, ingest
     preferred_langs: tuple[str, ...] = ("eng", "en", "english")
     asr_model: str = "small.en"
