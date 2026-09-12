@@ -62,6 +62,40 @@ def discover_input(input_dir: Path | None = None) -> list[Path]:
     return sorted(found, key=lambda p: p.stat().st_size, reverse=True)
 
 
+ENV_FILE = ROOT / ".env"
+
+
+def load_env_file(path: Path | None = None) -> list[str]:
+    """Read `KEY=value` lines from the project's own .env file.
+
+    Credentials belong to this directory, not to the user profile. Putting a
+    Hugging Face token in .env keeps it inside the project, where .gitignore
+    already excludes it, so nothing has to be written to a shared location to
+    authenticate.
+
+    Existing environment variables win, so a value exported in the shell still
+    overrides the file.
+    """
+    target = path or ENV_FILE
+    loaded: list[str] = []
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return loaded
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and value and not os.environ.get(key):
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
 def contain_environment() -> None:
     """Force every redirected location into the project directory.
 
@@ -74,6 +108,10 @@ def contain_environment() -> None:
 
 
 contain_environment()
+
+# Loaded after containment so a token in .env reaches every stage, while the
+# redirected cache locations above can never be overridden from a file.
+load_env_file()
 
 
 def is_contained(path: str | os.PathLike[str]) -> bool:
