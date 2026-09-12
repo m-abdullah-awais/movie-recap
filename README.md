@@ -29,12 +29,12 @@ needed.
 | 3 | `scenemap` | Coarse shot boundaries across the whole film | Built |
 | 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
 | 5 | `script` | Claude turns the story into narration segments with visual queries | Built |
-| 6 | `index` | Shot detection and CLIP embedding, restricted to relevant regions | Planned |
+| 6 | `index` | Keyframes and CLIP embeddings, restricted to relevant regions | Built |
 | 7 | `narrate` | Piper text to speech per segment, cached by text hash | Planned |
 | 8 | `select` | Score and pick shots for each narration segment | Planned |
 | 9 | `render` | ffmpeg assembles the final video, stream-copying the source | Planned |
 
-Stages 1 to 5 are complete. The remaining stages are built one at a time, each
+Stages 1 to 6 are complete. The remaining stages are built one at a time, each
 measured on a real film before the next begins.
 
 The film is read exactly once, in stage 2. No full-film video proxy is written,
@@ -55,7 +55,8 @@ On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
 | `scenemap` | 0:00 | |
 | `story` | 3:44 | $1.58 |
 | `script` | 2:33 | $0.46 |
-| Total | 13:31 | $2.04 |
+| `index` | 2:03 | |
+| Total | 15:34 | $2.04 |
 
 Reading the film is effectively the entire cost, and it is unavoidable. Scale by
 your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
@@ -145,6 +146,7 @@ Each stage runs on its own for debugging.
 .\.venv\Scripts\python.exe analyze.py scenemap "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py story    "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py script   "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe analyze.py index    "D:\films\movie.mkv"
 ```
 
 ### Useful flags
@@ -154,6 +156,7 @@ Each stage runs on its own for debugging.
 | `--force` | Ignore the cache and recompute every stage |
 | `--force-stage scenemap` | Recompute one stage and leave the others cached |
 | `--with-proxy` | Also write a full-film 480p proxy, for inspection only |
+| `--refine` | Refine shot boundaries with PySceneDetect. Much slower |
 | `--proxy-height 360` | Height of that proxy when `--with-proxy` is used |
 | `--threshold 6` | Lower the scene change threshold to detect more cuts |
 | `--no-qsv` | Disable Quick Sync and decode entirely in software |
@@ -196,6 +199,27 @@ from the finale.
 The script is written before any footage is chosen. That is what makes
 synchronisation automatic: once a line has been spoken and measured, its duration
 says exactly how much video must sit behind it.
+
+### Narrowing before indexing
+
+The script anchors every narration segment to a moment in the film, so only the
+stretches around those anchors can ever supply footage. Indexing the whole film
+instead is the easiest way to lose the time budget.
+
+The window around each anchor is adaptive, not fixed. A fixed window narrows
+nothing when the narration is dense: on a 94 minute film with 77 segments a
+median 62 seconds apart, a window of plus or minus 90 seconds merged into four
+regions covering 99 percent of the film. The window now halves until coverage
+meets a target fraction, which gave 77 regions over 15 percent of that film.
+
+Keyframes are named by their timestamp rather than by position. A positional
+name is reused by a later run whose shot boundaries differ, which silently pairs
+a shot with a frame from somewhere else.
+
+Refinement with PySceneDetect is available but off by default. Measured on the
+same film it cost 6 minutes 54 seconds and found 24 extra shots out of 243,
+because the regions are short and the existing boundaries already average about
+three seconds.
 
 ### Caching
 
@@ -271,6 +295,10 @@ Written to `cache/<source_id>/`.
 | `story_calls/` | story | One cached response per Claude call |
 | `script.json` | script | Narration segments with visual queries and spoiler ceilings |
 | `script_calls/` | script | One cached response per Claude call |
+| `shots.json` | index | Narrowed regions, shots, keyframes, brightness |
+| `keyframes/` | index | One 224 by 224 frame per shot, named by timestamp |
+| `clip_index.npy` | index | Shot embeddings, when CLIP is available |
+| `query_index.npy` | index | Visual query embeddings, when CLIP is available |
 | `timings.json` | all | Per-stage timings for every run |
 
 ## Project layout

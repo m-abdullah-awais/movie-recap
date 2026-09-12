@@ -9,6 +9,8 @@ dependencies = [
     "typer>=0.15",
     "numpy>=1.26,<3",
     "faster-whisper>=1.1",
+    "scenedetect>=0.7.1",
+    "piper-tts>=1.8.0",
 ]
 
 [tool.uv]

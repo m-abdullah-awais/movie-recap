@@ -14,16 +14,18 @@ from typing import Optional
 
 import typer
 
-from . import claude, config, ffmpeg, probe
+from . import claude, config, ffmpeg, models, probe
 from .cache import Cache, StageOutcome, read_json, source_id
 from .config import CACHE_ROOT, Settings
-from .stages import ingest, proxy, scenemap, script, story
+from .stages import (
+    index, ingest, narrate, proxy, render, scenemap, script, select, story,
+)
 from .timing import Report, format_hms
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Local movie recap generator. Analysis stages 1 to 5.",
+    help="Local movie recap generator. The full pipeline, stages 1 to 9.",
     # Typer's framed, syntax-highlighted traceback is far harder to read in a
     # terminal than a plain one, and it buries the actual message. Expected
     # failures are caught and reported as a single line; anything else raises a
@@ -31,7 +33,10 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
-ALL_STAGES = ("ingest", "proxy", "scenemap", "story", "script")
+ALL_STAGES = (
+    "ingest", "proxy", "scenemap", "story", "script",
+    "index", "narrate", "select", "render",
+)
 
 
 # Shared option definitions, declared once so every command stays consistent.
@@ -205,7 +210,7 @@ def run_all(
     json: bool = JsonOpt,
     quiet: bool = QuietOpt,
 ):
-    """Run stages 1 to 5, then print per stage timings."""
+    """Run the whole pipeline, stages 1 to 9, then print per stage timings."""
     force_stage = _validate_stages(force_stage)
     settings = _settings(proxy_height, threshold, no_qsv, with_proxy)
     movie, cache, probe_data, duration = _open(movie, cache_dir)
@@ -216,7 +221,7 @@ def run_all(
         print(f"cache: {cache.dir}")
 
     if not quiet:
-        print("\n[1/5] ingest")
+        print("\n[1/9] ingest")
     ingest_outcome, proxy_outcome = _run_ingest(
         cache, movie, probe_data, settings, report,
         force_all=force, force_stages=force_stage, quiet=quiet,
@@ -224,7 +229,7 @@ def run_all(
 
     if proxy_outcome is None:
         if not quiet:
-            print("\n[2/5] proxy")
+            print("\n[2/9] proxy")
         proxy_outcome = proxy.run(
             cache, movie, probe_data, settings,
             force=_forced("proxy", force, force_stage), quiet=quiet,
@@ -232,7 +237,7 @@ def run_all(
         report.add(proxy_outcome)
 
     if not quiet:
-        print("\n[3/5] scenemap")
+        print("\n[3/9] scenemap")
     report.add(scenemap.run(
         cache, proxy_outcome.meta, settings,
         force=_forced("scenemap", force, force_stage), quiet=quiet,
@@ -242,10 +247,10 @@ def run_all(
     # to read, so it is skipped rather than reported as a failure.
     if ingest_outcome.failed:
         if not quiet:
-            print("\n[4/5] story  skipped, no dialogue was obtained")
+            print("\n[4/9] story  skipped, no dialogue was obtained")
     else:
         if not quiet:
-            print("\n[4/5] story")
+            print("\n[4/9] story")
         try:
             report.add(story.run(
                 cache, settings,
@@ -259,7 +264,7 @@ def run_all(
     # Stage 5 narrates the story, so it only runs when there is one to narrate.
     if cache.path(story.STORY_FILE).is_file():
         if not quiet:
-            print("\n[5/5] script")
+            print("\n[5/9] script")
         try:
             report.add(script.run(
                 cache, settings,
@@ -272,7 +277,73 @@ def run_all(
                 StageOutcome("script", "failed", 0.0, {}, "no script written", str(exc))
             )
     elif not quiet:
-        print("\n[5/5] script  skipped, no story to narrate")
+        print("\n[5/9] script  skipped, no story to narrate")
+
+    # Stage 6 indexes the regions the script points at, so it needs a script.
+    if cache.path(script.SCRIPT_FILE).is_file():
+        if not quiet:
+            print("\n[6/9] index")
+        try:
+            report.add(index.run(
+                cache, movie, settings,
+                force=_forced("index", force, force_stage), quiet=quiet,
+            ))
+        except RuntimeError as exc:
+            if not quiet:
+                typer.secho("  index did not complete", fg=typer.colors.YELLOW)
+            report.add(StageOutcome("index", "failed", 0.0, {}, "no shot index", str(exc)))
+    elif not quiet:
+        print("\n[6/9] index  skipped, no script to index against")
+
+    # Stages 7 to 9 each depend on the previous one having produced its file,
+    # so a failure earlier stops the chain without raising.
+    if cache.path(index.SHOTS_FILE).is_file():
+        if not quiet:
+            print("\n[7/9] narrate")
+        try:
+            report.add(narrate.run(
+                cache, settings,
+                force=_forced("narrate", force, force_stage), quiet=quiet,
+            ))
+        except (RuntimeError, narrate.NoVoice) as exc:
+            if not quiet:
+                typer.secho("  narrate did not complete", fg=typer.colors.YELLOW)
+            report.add(StageOutcome(
+                "narrate", "failed", 0.0, {}, "no narration audio", str(exc)))
+    elif not quiet:
+        print("\n[7/9] narrate  skipped, no shot index")
+
+    if cache.path(narrate.NARRATION_FILE).is_file():
+        if not quiet:
+            print("\n[8/9] select")
+        try:
+            report.add(select.run(
+                cache, settings,
+                force=_forced("select", force, force_stage), quiet=quiet,
+            ))
+        except RuntimeError as exc:
+            if not quiet:
+                typer.secho("  select did not complete", fg=typer.colors.YELLOW)
+            report.add(StageOutcome(
+                "select", "failed", 0.0, {}, "no edit decision list", str(exc)))
+    elif not quiet:
+        print("\n[8/9] select  skipped, no narration audio")
+
+    if cache.path(select.EDL_FILE).is_file():
+        if not quiet:
+            print("\n[9/9] render")
+        try:
+            report.add(render.run(
+                cache, movie, probe_data, settings,
+                force=_forced("render", force, force_stage), quiet=quiet,
+            ))
+        except (RuntimeError, ffmpeg.FfmpegError) as exc:
+            if not quiet:
+                typer.secho("  render did not complete", fg=typer.colors.YELLOW)
+            report.add(StageOutcome(
+                "render", "failed", 0.0, {}, "no final video", str(exc)))
+    elif not quiet:
+        print("\n[9/9] render  skipped, no edit decision list")
 
     timings = report.persist(cache.dir)
 
@@ -390,6 +461,82 @@ def script_stage(
     print("\n" + report.render())
 
 
+@app.command("index")
+def index_stage(
+    movie: Optional[Path] = MovieArg,
+    force: bool = ForceOpt,
+    refine: bool = typer.Option(
+        False, "--refine",
+        help="Refine boundaries with PySceneDetect. Much slower, slightly finer shots.",
+    ),
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 6 only. Index shots in the regions the script references."""
+    settings = Settings()
+    if refine:
+        settings = dataclasses.replace(settings, refine_shots=True)
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    report.add(index.run(cache, movie, settings, force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
+@app.command("narrate")
+def narrate_stage(
+    movie: Optional[Path] = MovieArg,
+    force: bool = ForceOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 7 only. Speak every narration line and measure it."""
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    report.add(narrate.run(cache, Settings(), force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
+@app.command("select")
+def select_stage(
+    movie: Optional[Path] = MovieArg,
+    force: bool = ForceOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 8 only. Choose footage for each line and write the edit list."""
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    report.add(select.run(cache, Settings(), force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
+@app.command("render")
+def render_stage(
+    movie: Optional[Path] = MovieArg,
+    force: bool = ForceOpt,
+    copy_video: bool = typer.Option(
+        False, "--copy-video",
+        help="Stream copy instead of re-encoding. Faster, but clips snap to keyframes.",
+    ),
+    no_qsv: bool = NoQsvOpt,
+    cache_dir: Optional[Path] = CacheDirOpt,
+    quiet: bool = QuietOpt,
+):
+    """Stage 9 only. Render the final video and the sidecar subtitles."""
+    settings = Settings()
+    changes = {}
+    if copy_video:
+        changes["copy_video"] = True
+    if no_qsv:
+        changes["allow_qsv"] = False
+    if changes:
+        settings = dataclasses.replace(settings, **changes)
+    movie, cache, probe_data, duration = _open(movie, cache_dir)
+    report = Report(movie, duration)
+    report.add(render.run(cache, movie, probe_data, settings, force=force, quiet=quiet))
+    print("\n" + report.render())
+
+
 @app.command()
 def info(
     movie: Optional[Path] = MovieArg,
@@ -449,6 +596,42 @@ def info(
     else:
         plan = "speech recognition, the model will be downloaded on first use"
     print(f"\n  dialogue source would be: {plan}")
+
+
+@app.command("fetch-models")
+def fetch_models(
+    attempts: int = typer.Option(
+        6, "--attempts", help="How many times to retry a rate limited host."
+    ),
+):
+    """Download the CLIP encoders and the Piper voice into the project.
+
+    Separate from the stages so that a rate limited host is waited out here,
+    deliberately, rather than in the middle of a pipeline run.
+    """
+    print(f"models directory: {config.MODELS_DIR}")
+
+    print("\nPiper voice")
+    voice = models.ensure_piper_voice(attempts=attempts)
+    if voice is None:
+        typer.secho("  unavailable", fg=typer.colors.RED)
+    else:
+        print(f"  ready: {voice.name}")
+
+    print("\nCLIP encoders")
+    assets = models.ensure_clip(attempts=attempts)
+    if assets is None:
+        typer.secho(
+            "  unavailable. Shot selection will fall back to time proximity.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        print("  ready: vision, text and tokenizer")
+
+    ok = voice is not None and assets is not None
+    print()
+    print("all models present" if ok else "some models are missing, see above")
+    raise typer.Exit(0 if ok else 1)
 
 
 @app.command()

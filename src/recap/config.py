@@ -151,6 +151,75 @@ class Settings:
     # shot from the finale.
     spoiler_lookahead_s: float = 180.0
 
+    # Stage 6, index.
+    #
+    # Narrow first. Only the stretches of film the narration actually references
+    # are indexed, which for a feature is roughly 25 minutes rather than 120.
+    # Indexing the whole film is the single easiest way to blow the budget.
+    # The window is a starting point, not a fixed figure. It is halved until the
+    # regions cover no more than the target fraction of the runtime, because a
+    # fixed window narrows nothing when the narration is dense: measured on a 94
+    # minute film with 77 segments a median 62 seconds apart, a 90 second window
+    # merged into four regions covering 99 percent of the film.
+    index_window_s: float = 90.0
+    index_target_coverage: float = 0.30
+    index_min_window_s: float = 5.0
+    index_max_shots: int = 900
+    # Refinement with PySceneDetect inside the narrowed regions is off by
+    # default. Measured on the 94 minute film it cost 6 minutes 54 seconds and
+    # found 24 extra shots out of 243, because the regions are only a few seconds
+    # long and the stage 3 boundaries already average about three seconds. Nearly
+    # seven minutes of a twenty five minute budget is too much for a ten percent
+    # change in shot count. Enable it with --refine when accuracy matters more.
+    refine_shots: bool = False
+    refine_threshold: float = 27.0
+    keyframe_workers: int = 4
+    clip_batch: int = 8
+
+    # Stage 7, narrate.
+    #
+    # A short gap between lines stops the narration sounding rushed and gives the
+    # render a natural place to change shot. Length scale is Piper's speaking
+    # rate, where above 1.0 is slower.
+    narrate_gap_s: float = 0.35
+    piper_length_scale: float = 1.0
+    narrate_workers: int = 2
+
+    # Stage 8, select.
+    #
+    # Weights are deliberately exposed. What looks right varies by film, and the
+    # stage is cheap to re-run because it touches no video. Similarity is
+    # rescaled per line before weighting, since CLIP cosine scores occupy a
+    # narrow positive band and would otherwise be swamped by proximity.
+    clip_weight: float = 1.0
+    proximity_weight: float = 0.6
+    band_weight: float = 0.25
+    reuse_penalty: float = 0.35
+    dark_penalty: float = 0.5
+    dark_luma: float = 18.0
+    max_shot_uses: int = 3
+    min_clip_s: float = 1.5
+    max_clip_s: float = 4.0
+    proximity_sigma_s: float = 60.0
+
+    # Stage 9, render.
+    #
+    # copy_video is off by default. Stream copying is much faster but can only
+    # start a clip on a keyframe, and these clip boundaries come from shot
+    # detection and narration timing, so they fall wherever they fall. Copying
+    # would shift every clip to an earlier keyframe or emit corrupt leading
+    # frames, so the default is a frame accurate re-encode.
+    copy_video: bool = False
+    render_height: int = 1080
+    render_crf: int = 21
+    # Ducking the film under the narration. The threshold is deliberately low:
+    # the sidechain is the narration itself, so any speech at all should pull the
+    # film down.
+    duck_threshold: float = 0.03
+    duck_ratio: float = 8.0
+    narration_gain: float = 1.0
+    source_gain: float = 0.8
+
     # Stage 1, ingest
     preferred_langs: tuple[str, ...] = ("eng", "en", "english")
     asr_model: str = "small.en"
