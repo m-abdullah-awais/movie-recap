@@ -251,6 +251,29 @@ moment being described, how comfortably their length fits the clip band, and
 penalties for reuse and darkness. The spoiler ceiling is a hard exclusion rather
 than a penalty, and a shot may be used only a limited number of times.
 
+### Matching shots to meaning
+
+With the CLIP encoders present, each shot's keyframe and each line's visual query
+are embedded into the same 512 dimensional space, and a dot product gives the
+similarity. Cosine scores sit in a narrow positive band, so they are rescaled per
+line before weighting, otherwise time proximity would dominate simply because it
+already spans zero to one.
+
+Measured on a real film, 84 percent of chosen clips score above 0.5 after
+rescaling and 31 percent above 0.8. The useful sign is that matching overrides
+chronology when it should: a line calling for a boy running from police at night
+was given a shot 50 seconds away from its narration anchor, because that shot
+actually showed it.
+
+Preprocessing is verified rather than assumed. Wrong channel order or wrong
+normalisation constants raise no error, they just quietly degrade every score, so
+the check compares the darkest and brightest keyframes against matching prompts
+and confirms each prefers its own.
+
+Without the encoders the stage falls back to time proximity, which still produces
+a finished video, with footage that follows the plot chronologically rather than
+matching each line.
+
 ### Rendering
 
 One ffmpeg invocation reads every clip straight out of the original film through

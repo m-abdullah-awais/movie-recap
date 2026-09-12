@@ -91,17 +91,6 @@ class Clip:
 
     # ---- images -----------------------------------------------------------
 
-    @staticmethod
-    def preprocess(image_bgr: np.ndarray) -> np.ndarray:
-        """Turn one decoded frame into a CLIP input tensor.
-
-        Frames arrive from OpenCV in BGR with the channel axis last. CLIP expects
-        RGB, channels first, scaled to 0 to 1, then normalised.
-        """
-        rgb = image_bgr[:, :, ::-1].astype(np.float32) / 255.0
-        normalised = (rgb - _MEAN) / _STD
-        return np.transpose(normalised, (2, 0, 1))
-
     def embed_images(self, batch: np.ndarray) -> np.ndarray:
         """Embed a batch of preprocessed images, shape (n, 3, 224, 224)."""
         result = self._vision.run([self._vision_output], {self._vision_input: batch})[0]
@@ -122,6 +111,23 @@ class Clip:
                 feed[name] = ids
         result = self._text.run([self._text_output], feed)[0]
         return _l2_normalise(np.asarray(result, dtype=np.float32))
+
+
+def preprocess(image_bgr: np.ndarray) -> np.ndarray:
+    """Turn one decoded frame into a CLIP input tensor.
+
+    Module level rather than a method, because callers preprocess frames while
+    batching them up and should not need a loaded model to do it.
+
+    Frames arrive from OpenCV in BGR with the channel axis last. CLIP expects
+    RGB, channels first, scaled to 0 to 1, then normalised with its own
+    constants. Getting the channel order or the constants wrong does not raise,
+    it just quietly degrades every similarity score, which is why this is
+    verified against known-brightness frames rather than assumed.
+    """
+    rgb = image_bgr[:, :, ::-1].astype(np.float32) / 255.0
+    normalised = (rgb - _MEAN) / _STD
+    return np.transpose(normalised, (2, 0, 1))
 
 
 def _l2_normalise(matrix: np.ndarray) -> np.ndarray:

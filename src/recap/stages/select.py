@@ -20,7 +20,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 2  # bumped: records spoken duration separately
+VERSION = 3  # bumped: cache key chains the index stage and CLIP availability
 
 EDL_FILE = "edl.json"
 
@@ -91,6 +91,19 @@ def run(
     params = settings.params(*PARAM_NAMES)
     params["line_count"] = len(lines)
     params["shot_count"] = len(shots)
+    # Chaining the index stage's key means anything that changes the shot index
+    # invalidates this stage too. Without it, a cached result produced before the
+    # CLIP model arrived stays valid forever and selection silently keeps scoring
+    # on time proximity alone even though embeddings are now available.
+    index_meta = cache.path("index.meta.json")
+    if index_meta.is_file():
+        try:
+            params["index_key"] = read_json(index_meta).get("key")
+        except Exception:  # noqa: BLE001 - an unreadable meta just means recompute
+            params["index_key"] = None
+    params["clip"] = (
+        cache.path("clip_index.npy").is_file() and cache.path("query_index.npy").is_file()
+    )
 
     def work() -> dict:
         image_path = cache.path("clip_index.npy")
