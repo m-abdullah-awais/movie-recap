@@ -80,6 +80,7 @@ def run(
 
     narration = read_json(narration_path)
     index = read_json(shots_path)
+    runtime_s = _num(index.get("runtime_s"))
     lines = narration.get("segments") or []
     shots = [s for s in (index.get("shots") or []) if s.get("has_keyframe")]
     if not lines:
@@ -130,8 +131,15 @@ def run(
         timeline: list[dict] = []
         unfilled = 0
 
-        for line in lines:
+        gap_s = _num(narration.get("gap_s"))
+        for position, line in enumerate(lines):
+            # Footage has to span the line plus the silence after it. The
+            # narration track carries those gaps, so covering only the spoken
+            # seconds would leave the video one gap per line shorter than the
+            # audio, and the tail of the narration would be cut off.
             need = _num(line.get("seconds"))
+            if position < len(lines) - 1:
+                need += gap_s
             story_time = _num(line.get("story_time"))
             ceiling = _num(line.get("spoiler_ceiling"), story_time)
 
@@ -143,10 +151,14 @@ def run(
 
             similarity = np.zeros(len(shots), dtype=np.float32)
             if use_clip:
-                query = query_vectors[int(line.get("script_i", line["i"]))]
-                for position, row in enumerate(rows):
-                    if row is not None and 0 <= row < image_vectors.shape[0]:
-                        similarity[position] = float(image_vectors[row] @ query)
+                wanted = line.get("script_i")
+                wanted = int(wanted) if wanted is not None else int(line.get("i", 0))
+                query = query_vectors[min(wanted, query_vectors.shape[0] - 1)]
+                # Distinct names on purpose: reusing the outer loop's variable
+                # here would clobber it for the rest of the iteration.
+                for shot_position, shot_row in enumerate(rows):
+                    if shot_row is not None and 0 <= shot_row < image_vectors.shape[0]:
+                        similarity[shot_position] = float(image_vectors[shot_row] @ query)
                 # Cosine similarity for CLIP sits in a narrow positive band, so
                 # it is rescaled per line. Otherwise proximity would dominate
                 # simply because it already spans zero to one.
@@ -163,6 +175,9 @@ def run(
             # Anything at or past the ceiling would show a reveal the narration
             # has not reached. This is a hard exclusion, not a penalty.
             score = np.where(starts <= ceiling, score, -1e6)
+            # The reuse penalty only discourages. The cap is what stops one
+            # striking shot appearing under half the recap.
+            score = np.where(uses < settings.max_shot_uses, score, -1e6)
 
             clips: list[dict] = []
             remaining = need
@@ -178,7 +193,9 @@ def run(
                 take = min(settings.max_clip_s, max(settings.min_clip_s, remaining))
                 take = min(take, available) if available > 0 else take
                 if take <= 0.05:
-                    uses[best] += settings.max_shot_uses
+                    # Hard exclude. Bumping the use count only adds a fraction
+                    # of a point of penalty, so the same shot would win again.
+                    score[best] = -1e6
                     continue
 
                 # Centre the clip in its shot so it avoids the cut at either end.
@@ -205,8 +222,11 @@ def run(
             drift = need - sum(c["duration"] for c in clips)
             if abs(drift) > 0.001:
                 last = clips[-1]
-                last["src_end"] = round(last["src_end"] + drift, 3)
-                last["duration"] = round(last["duration"] + drift, 3)
+                # Clamped to the runtime. Absorbing drift into the last clip can
+                # otherwise ask for footage from past the end of the film.
+                new_end = min(runtime_s, last["src_end"] + drift)
+                last["src_end"] = round(new_end, 3)
+                last["duration"] = round(new_end - last["src_start"], 3)
 
             timeline.append({
                 "i": len(timeline),
@@ -230,8 +250,9 @@ def run(
             "source_id": cache.sid,
             "source_name": cache.source.name,
             "source_file": cache.source.name,
-            "total_seconds": round(sum(t["seconds"] for t in timeline)
-                                   + narration.get("gap_s", 0.0) * max(0, len(timeline) - 1), 3),
+            "total_seconds": round(
+                sum(c["duration"] for t in timeline for c in t["clips"]), 3
+            ),
             "gap_s": narration.get("gap_s", 0.0),
             "used_clip": use_clip,
             "timeline": timeline,

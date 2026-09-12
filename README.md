@@ -30,12 +30,11 @@ needed.
 | 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
 | 5 | `script` | Claude turns the story into narration segments with visual queries | Built |
 | 6 | `index` | Keyframes and CLIP embeddings, restricted to relevant regions | Built |
-| 7 | `narrate` | Piper text to speech per segment, cached by text hash | Planned |
-| 8 | `select` | Score and pick shots for each narration segment | Planned |
+| 7 | `narrate` | Piper text to speech per segment, cached by text hash | Built |
+| 8 | `select` | Score and pick shots for each narration segment | Built |
 | 9 | `render` | ffmpeg assembles the final video, stream-copying the source | Planned |
 
-Stages 1 to 6 are complete. The remaining stages are built one at a time, each
-measured on a real film before the next begins.
+Stages 1 to 8 are complete. Stage 9 is written and awaiting its first run.
 
 The film is read exactly once, in stage 2. No full-film video proxy is written,
 because nothing downstream needs one: stage 6 indexes only the regions the
@@ -56,7 +55,9 @@ On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
 | `story` | 3:44 | $1.58 |
 | `script` | 2:33 | $0.46 |
 | `index` | 2:03 | |
-| Total | 15:34 | $2.04 |
+| `narrate` | 1:14 | |
+| `select` | 0:00 | |
+| Total | 16:48 | $2.04 |
 
 Reading the film is effectively the entire cost, and it is unavoidable. Scale by
 your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
@@ -147,6 +148,8 @@ Each stage runs on its own for debugging.
 .\.venv\Scripts\python.exe analyze.py story    "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py script   "D:\films\movie.mkv"
 .\.venv\Scripts\python.exe analyze.py index    "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe analyze.py narrate  "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe analyze.py select   "D:\films\movie.mkv"
 ```
 
 ### Useful flags
@@ -220,6 +223,31 @@ Refinement with PySceneDetect is available but off by default. Measured on the
 same film it cost 6 minutes 54 seconds and found 24 extra shots out of 243,
 because the regions are short and the existing boundaries already average about
 three seconds.
+
+### Speaking, then choosing footage
+
+Narration is spoken before any footage is chosen, and each line is measured. That
+measured duration is what tells the next stage how much video to pack behind the
+line, which is why no forced aligner is needed anywhere.
+
+Each line is cached by the hash of its own text and the speaking rate, so editing
+one segment re-speaks only that segment and two identical lines are synthesised
+once.
+
+Speaking rate needed calibrating against measurement rather than assumption. The
+Lessac medium voice runs at about 205 words per minute at its default, which is
+rushed. The response to the length scale is not linear: 1.6 gives roughly 170,
+and 2.0 drops to 134. The default of 1.6 measured 154.8 words per minute on a
+real script.
+
+Footage for each line spans the spoken seconds plus the silence that follows it.
+Covering only the spoken part would leave the video one gap per line shorter than
+the audio, which across 77 lines is about 27 seconds of narration cut off the end.
+
+Shots are scored on similarity to the line's visual query, closeness to the
+moment being described, how comfortably their length fits the clip band, and
+penalties for reuse and darkness. The spoiler ceiling is a hard exclusion rather
+than a penalty, and a shot may be used only a limited number of times.
 
 ### Caching
 
@@ -299,6 +327,9 @@ Written to `cache/<source_id>/`.
 | `keyframes/` | index | One 224 by 224 frame per shot, named by timestamp |
 | `clip_index.npy` | index | Shot embeddings, when CLIP is available |
 | `query_index.npy` | index | Visual query embeddings, when CLIP is available |
+| `narration.json` | narrate | Spoken lines with measured durations and offsets |
+| `audio/` | narrate | One wav per distinct line, named by text hash |
+| `edl.json` | select | Edit decision list, clips chosen per line |
 | `timings.json` | all | Per-stage timings for every run |
 
 ## Project layout

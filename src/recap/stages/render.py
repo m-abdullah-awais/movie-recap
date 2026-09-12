@@ -159,7 +159,26 @@ def video_args(settings: Settings, use_qsv: bool) -> list[str]:
     ]
 
 
-def audio_filter(settings: Settings) -> str:
+def audio_ordinal(probe_data: dict, settings: Settings) -> int:
+    """Which audio stream to take, counted among audio streams only.
+
+    A dual-audio film is common, and this one has Hindi first and English
+    second. Referring to the first audio stream would put the wrong language
+    under the narration. The concat demuxer renumbers streams, so the selection
+    has to be expressed as an ordinal among audio streams rather than as the
+    original stream index.
+    """
+    audio_streams = ffmpeg.streams(probe_data, "audio")
+    chosen = probe.select_audio(probe_data, settings)
+    if chosen is None:
+        return 0
+    for ordinal, stream in enumerate(audio_streams):
+        if stream.index == chosen.index:
+            return ordinal
+    return 0
+
+
+def audio_filter(settings: Settings, ordinal: int) -> str:
     """Narration over the film's audio, with the film ducked underneath.
 
     The narration is split: one copy is mixed in, the other keys the compressor.
@@ -169,7 +188,7 @@ def audio_filter(settings: Settings) -> str:
     return (
         f"[1:a]volume={settings.narration_gain}[nar];"
         f"[nar]asplit=2[narmix][narkey];"
-        f"[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+        f"[0:a:{ordinal}]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
         f"volume={settings.source_gain}[src];"
         f"[src][narkey]sidechaincompress="
         f"threshold={settings.duck_threshold}:ratio={settings.duck_ratio}"
@@ -215,6 +234,11 @@ def run(
         if not settings.copy_video and settings.allow_qsv:
             use_qsv = ffmpeg.qsv_available()
 
+        ordinal = audio_ordinal(probe_data, settings)
+        chosen = probe.select_audio(probe_data, settings)
+        if not quiet and chosen is not None:
+            print(f"  film audio: {chosen.label} (audio stream {ordinal})")
+
         expected = _num(edl.get("total_seconds"))
         if not quiet:
             plan = "stream copy" if settings.copy_video else (
@@ -226,7 +250,7 @@ def run(
             ffmpeg.ffmpeg_bin(), "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
             "-f", "concat", "-safe", "0", "-i", cache.path(CLIPLIST_FILE).name,
             "-i", narration_wav.name,
-            "-filter_complex", audio_filter(settings),
+            "-filter_complex", audio_filter(settings, ordinal),
             "-map", "0:v:0", "-map", "[mix]",
             *video_args(settings, use_qsv),
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",

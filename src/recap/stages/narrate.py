@@ -22,7 +22,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "narrate"
-VERSION = 1
+VERSION = 2  # bumped: speaking rate is now actually applied
 
 NARRATION_FILE = "narration.json"
 AUDIO_DIR = "audio"
@@ -72,19 +72,32 @@ class PiperSpeaker:
         except Exception as exc:  # noqa: BLE001
             raise NoVoice(f"the Piper voice could not be loaded: {exc}") from exc
 
-        self._length_scale = length_scale
         self.name = voice.name
+
+        # The speaking rate has to be handed to each synthesis call. Holding it
+        # on the object does nothing, which is how the voice ended up narrating
+        # at 200 words per minute when 150 to 170 is the readable range.
+        self._config = None
+        try:
+            from piper import SynthesisConfig
+
+            self._config = SynthesisConfig(length_scale=length_scale)
+        except ImportError:
+            pass
 
     def speak(self, text: str, target: Path) -> bool:
         """Write one spoken line to a wav file.
 
-        The synthesis entry point was renamed between Piper releases, so both
-        spellings are tried rather than pinning to one version.
+        The synthesis entry point and its options changed between Piper
+        releases, so the call degrades from the configured form to the bare one
+        rather than pinning to a single version.
         """
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             with wave.open(str(target), "wb") as handle:
-                if hasattr(self._voice, "synthesize_wav"):
+                if self._config is not None:
+                    self._voice.synthesize_wav(text, handle, syn_config=self._config)
+                elif hasattr(self._voice, "synthesize_wav"):
                     self._voice.synthesize_wav(text, handle)
                 else:
                     self._voice.synthesize(text, handle)

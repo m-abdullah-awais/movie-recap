@@ -182,7 +182,12 @@ class Settings:
     # render a natural place to change shot. Length scale is Piper's speaking
     # rate, where above 1.0 is slower.
     narrate_gap_s: float = 0.35
-    piper_length_scale: float = 1.0
+    # Above 1.0 is slower, and the response is not linear in words per minute.
+    # Measured on the Lessac medium voice: 1.0 gives 205 wpm, 1.6 gives 170, and
+    # 2.0 gives 134. Its default rate is rushed for something a viewer listens to
+    # for a quarter of an hour, so 1.6 lands in the usual recap range while
+    # keeping the video near fifteen minutes.
+    piper_length_scale: float = 1.6
     narrate_workers: int = 2
 
     # Stage 8, select.
