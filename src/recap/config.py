@@ -311,6 +311,14 @@ class Settings:
     min_clip_s: float = 1.5
     max_clip_s: float = 4.0
     proximity_sigma_s: float = 60.0
+    # How far from the narrated moment footage may be taken. Proximity alone is
+    # only a score, and a spuriously confident CLIP match will beat a mediocre
+    # nearby shot from anywhere in the film. Measured with no limit at all, 8.7
+    # percent of clips came from more than five minutes away and one from 58
+    # minutes away, which reads as footage unrelated to the narration. Three
+    # minutes is wide enough to survive an anchor that Claude placed wrongly,
+    # and tight enough to keep the recap in the scene being described.
+    max_shot_distance_s: float = 180.0
 
     # Stage 9, render.
     #

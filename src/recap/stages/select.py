@@ -20,14 +20,14 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 5  # bumped: clip lengths quantised to whole frames
+VERSION = 6  # bumped: bounded search radius around the narrated moment
 
 EDL_FILE = "edl.json"
 
 PARAM_NAMES = (
     "clip_weight", "proximity_weight", "band_weight",
     "reuse_penalty", "dark_penalty", "min_clip_s", "max_clip_s",
-    "proximity_sigma_s", "dark_luma", "max_shot_uses",
+    "proximity_sigma_s", "dark_luma", "max_shot_uses", "max_shot_distance_s",
 )
 
 
@@ -222,6 +222,17 @@ def run(
             # The reuse penalty only discourages. The cap is what stops one
             # striking shot appearing under half the recap.
             score = np.where(uses < settings.max_shot_uses, score, -1e6)
+            # A bounded search radius. Proximity is only a score, so without
+            # this a confident but spurious match wins from anywhere in the
+            # film, which reads as footage that has nothing to do with the
+            # narration. Widened only if nothing inside the radius qualifies.
+            radius = settings.max_shot_distance_s
+            for _ in range(4):
+                near = np.abs(starts - story_time) <= radius
+                if np.any(np.where(near, score, -1e6) > -1e5):
+                    break
+                radius *= 2.0
+            score = np.where(np.abs(starts - story_time) <= radius, score, -1e6)
 
             clips: list[dict] = []
             remaining = need
