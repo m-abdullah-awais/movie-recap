@@ -372,6 +372,11 @@ class Settings:
     # Ducking the film under the narration. The threshold is deliberately low:
     # the sidechain is the narration itself, so any speech at all should pull the
     # film down.
+    # The film's own audio is dropped rather than ducked. Ducking leaves the
+    # original dialogue and music audible underneath, which competes with the
+    # narrator instead of supporting him. Set this false to bring the film's
+    # audio back as a ducked bed, controlled by the settings below.
+    mute_source_audio: bool = True
     duck_threshold: float = 0.03
     duck_ratio: float = 8.0
     narration_gain: float = 1.0

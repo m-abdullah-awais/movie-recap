@@ -30,7 +30,7 @@ from ..cache import Cache, StageOutcome, atomic_path, read_json, run_stage, writ
 from ..config import OUTPUT_DIR, Settings
 
 STAGE = "render"
-VERSION = 7  # bumped: no subtitle file published beside the video
+VERSION = 8  # bumped: the film's own audio is muted, narration only
 
 FINAL_FILE = "final.mp4"
 # Written here first, then moved into place. See the note in run(). The .mp4
@@ -46,8 +46,8 @@ SILENCE_WAV_FMT = "gap_{rate}hz.wav"
 
 PARAM_NAMES = (
     "render_height", "render_crf", "qsv_quality", "allow_qsv", "copy_video",
-    "duck_threshold", "duck_ratio", "narration_gain", "source_gain",
-    "publish_subtitles",
+    "mute_source_audio", "duck_threshold", "duck_ratio",
+    "narration_gain", "source_gain", "publish_subtitles",
 )
 
 
@@ -295,12 +295,25 @@ def audio_ordinal(probe_data: dict, settings: Settings) -> int:
 
 
 def audio_filter(settings: Settings, ordinal: int) -> str:
-    """Narration over the film's audio, with the film ducked underneath.
+    """The finished audio track.
 
-    The narration is split: one copy is mixed in, the other keys the compressor.
-    Without the split the sidechain input would be consumed and the mix would
-    lose the narration entirely.
+    By default the film's own sound is dropped and only the narrator is heard.
+    Ducking the original underneath left its dialogue and music audible, which
+    competes with the narration rather than supporting it.
+
+    With ducking enabled instead, the narration is split: one copy is mixed in,
+    the other keys the compressor. Without that split the sidechain input would
+    be consumed and the mix would lose the narration entirely.
     """
+    if settings.mute_source_audio:
+        # The film's audio stream is simply never referenced, so nothing from it
+        # reaches the output. Resampled here because the narration is mono at the
+        # voice's own rate and the output is 48 kHz stereo.
+        return (
+            f"[1:a]volume={settings.narration_gain},"
+            f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[mix]"
+        )
+
     return (
         f"[1:a]volume={settings.narration_gain}[nar];"
         f"[nar]asplit=2[narmix][narkey];"
@@ -359,9 +372,13 @@ def run(
             use_qsv = ffmpeg.qsv_available()
 
         ordinal = audio_ordinal(probe_data, settings)
-        chosen = probe.select_audio(probe_data, settings)
-        if not quiet and chosen is not None:
-            print(f"  film audio: {chosen.label} (audio stream {ordinal})")
+        if not quiet:
+            if settings.mute_source_audio:
+                print("  film audio muted, narration only")
+            else:
+                chosen = probe.select_audio(probe_data, settings)
+                if chosen is not None:
+                    print(f"  film audio: {chosen.label} (audio stream {ordinal})")
 
         expected = _num(edl.get("total_seconds"))
         if not quiet:
