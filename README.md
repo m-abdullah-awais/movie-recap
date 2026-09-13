@@ -203,17 +203,27 @@ The script is written before any footage is chosen. That is what makes
 synchronisation automatic: once a line has been spoken and measured, its duration
 says exactly how much video must sit behind it.
 
-### Narrowing before indexing
+### Searching the whole film
 
-The script anchors every narration segment to a moment in the film, so only the
-stretches around those anchors can ever supply footage. Indexing the whole film
-instead is the easiest way to lose the time budget.
+Every shot between the opening titles and the end credits is a candidate, so a
+good visual match can win from anywhere. Time still matters, but as a score in
+stage 8 rather than a filter here.
 
-The window around each anchor is adaptive, not fixed. A fixed window narrows
-nothing when the narration is dense: on a 94 minute film with 77 segments a
-median 62 seconds apart, a window of plus or minus 90 seconds merged into four
-regions covering 99 percent of the film. The window now halves until coverage
-meets a target fraction, which gave 77 regions over 15 percent of that film.
+An earlier version indexed only narrow windows around each narration anchor.
+That was a speed optimisation and it quietly capped retrieval quality: it left
+roughly three candidates per line, so the timestamp effectively chose the footage
+and CLIP only broke ties between near-duplicates. It was also brittle, because
+those anchors come from Claude reading subtitle timings, and one off by half a
+minute put every candidate in the wrong scene with no way to recover.
+
+Set `index_whole_film` to false to restore the narrowed behaviour, which keeps
+the adaptive window that halves until coverage meets a target fraction.
+
+Frames are padded to CLIP's square input rather than centre-cropped. Cropping is
+what CLIP's own preprocessing does, but on a 1920x1080 frame it keeps only the
+middle 224 of 398 pixels and discards 44 percent of the width, which in
+widescreen film often holds the subject. The two produce measurably different
+embeddings, cosine 0.86 on a test frame. Set `keyframe_fit` to crop to compare.
 
 Keyframes are named by their timestamp rather than by position. A positional
 name is reused by a later run whose shot boundaries differ, which silently pairs

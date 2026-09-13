@@ -1,17 +1,20 @@
-"""Stage 6, shot index over the narrowed regions.
+"""Stage 6, the shot index.
 
-Narrow first. The script anchors each narration segment to a moment in the film,
-so only the stretches around those anchors can ever be used as footage. For a
-feature that is roughly twenty five minutes rather than two hours, and indexing
-the whole film instead is the easiest way to lose the time budget.
+One keyframe per shot, embedded with CLIP alongside the script's visual queries.
+Saving the query embeddings here means stage 8 is pure numpy and needs no model.
 
-Within those regions one keyframe is taken per shot, and both the keyframes and
-the script's visual queries are embedded with CLIP. Saving the query embeddings
-here means stage 8 is pure numpy and needs no model at all.
+Every shot between the opening titles and the end credits is a candidate. An
+earlier version indexed only narrow windows around each narration anchor, which
+was a speed optimisation that quietly capped retrieval: it left about three
+candidates per line, so the timestamp chose the footage and CLIP merely broke
+ties. It was also brittle, because those anchors come from Claude reading
+subtitle timings, and one off by half a minute put every candidate in the wrong
+scene. Time is now a preference applied in stage 8 rather than a gate applied
+here. Set index_whole_film to false to restore the old behaviour.
 
-Boundaries come from stage 3 by default. PySceneDetect can refine them inside the
-regions, but measured on a 94 minute film that cost 6 minutes 54 seconds to find
-24 extra shots out of 243, so it is opt in rather than automatic.
+Boundaries come from stage 3 by default. PySceneDetect can refine them, but
+measured on a 94 minute film that cost 6 minutes 54 seconds to find 24 extra
+shots out of 243, so it is opt in rather than automatic.
 
 Vision is used only for retrieval. It never reads the story.
 """
@@ -30,7 +33,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "index"
-VERSION = 5  # bumped: credits excluded, and the source frame rate recorded
+VERSION = 6  # bumped: whole-film search, and keyframes padded not cropped
 
 SHOTS_FILE = "shots.json"
 INDEX_FILE = "clip_index.npy"
@@ -38,6 +41,7 @@ QUERY_FILE = "query_index.npy"
 KEYFRAME_DIR = "keyframes"
 
 PARAM_NAMES = (
+    "index_whole_film", "keyframe_fit",
     "index_window_s", "index_target_coverage", "index_min_window_s",
     "index_max_shots", "refine_shots", "refine_threshold", "clip_batch",
     "credits_lead_in_s", "credits_lead_out_s",
@@ -201,12 +205,28 @@ def refine_with_scenedetect(
     return refined or None
 
 
-def _extract_keyframe(source: Path, at_s: float, target: Path) -> bool:
-    """Pull one frame, already cropped to CLIP's input size.
+def fit_filter(mode: str) -> str:
+    """How a source frame is fitted into CLIP's square input.
+
+    Cropping matches CLIP's own preprocessing, but on a 1920x1080 frame it fits
+    the short side to 224 and then keeps only the middle 224 of 398 pixels,
+    discarding 44 percent of the width. In widescreen film the subject is often
+    outside that middle. Padding fits the whole frame and fills the remainder
+    with black, trading some detail for keeping everything the shot contains.
+    """
+    size = clipmod.IMAGE_SIZE
+    if mode == "crop":
+        return (f"scale={size}:{size}:force_original_aspect_ratio=increase,"
+                f"crop={size}:{size}")
+    return (f"scale={size}:{size}:force_original_aspect_ratio=decrease,"
+            f"pad={size}:{size}:(ow-iw)/2:(oh-ih)/2:black")
+
+
+def _extract_keyframe(source: Path, at_s: float, target: Path, fit: str) -> bool:
+    """Pull one frame, fitted to CLIP's input size.
 
     ``-ss`` before the input seeks on keyframes first, which is what makes a few
-    hundred independent extractions affordable. The scale and crop pair
-    reproduces CLIP's own preprocessing: fit the short side, then centre crop.
+    hundred independent extractions affordable.
     """
     if target.is_file() and target.stat().st_size > 0:
         return True
@@ -217,10 +237,7 @@ def _extract_keyframe(source: Path, at_s: float, target: Path) -> bool:
                 "-ss", f"{max(0.0, at_s):.3f}",
                 "-i", str(source.resolve()),
                 "-frames:v", "1",
-                "-vf",
-                f"scale={clipmod.IMAGE_SIZE}:{clipmod.IMAGE_SIZE}"
-                f":force_original_aspect_ratio=increase,"
-                f"crop={clipmod.IMAGE_SIZE}:{clipmod.IMAGE_SIZE}",
+                "-vf", fit_filter(fit),
                 "-q:v", "3",
                 str(target),
             ],
@@ -275,24 +292,36 @@ def run(
                   f"discarding {content_start / 60:.1f} min of opening titles and "
                   f"{(runtime_s - content_end) / 60:.1f} min of end credits")
 
-        anchors = [_num(s.get("story_time")) for s in segments]
-        regions, window = narrow_adaptively(
-            anchors, runtime_s,
-            settings.index_window_s,
-            settings.index_target_coverage,
-            settings.index_min_window_s,
-        )
-        regions = clamp_regions(regions, content_start, content_end)
-        if not regions:
-            raise RuntimeError(
-                "every narrowed region fell outside the film's content span"
+        if settings.index_whole_film:
+            # Everything between the titles and the credits is a candidate, so a
+            # good visual match can win from anywhere in the film. Time still
+            # matters, but as a score in stage 8 rather than a gate here.
+            regions = [(content_start, content_end)]
+            window = None
+        else:
+            anchors = [_num(s.get("story_time")) for s in segments]
+            regions, window = narrow_adaptively(
+                anchors, runtime_s,
+                settings.index_window_s,
+                settings.index_target_coverage,
+                settings.index_min_window_s,
             )
+            regions = clamp_regions(regions, content_start, content_end)
+            if not regions:
+                raise RuntimeError(
+                    "every narrowed region fell outside the film's content span"
+                )
+
         covered = sum(e - s for s, e in regions)
         if not quiet:
-            print(f"  narrowed to {len(regions)} regions using a "
-                  f"{window:.0f}s window, {covered / 60:.1f} min of "
-                  f"{runtime_s / 60:.1f} min "
-                  f"({covered / max(1.0, runtime_s) * 100:.0f}% of the film)")
+            if window is None:
+                print(f"  indexing the whole film, {covered / 60:.1f} min "
+                      f"of {runtime_s / 60:.1f} min after titles and credits")
+            else:
+                print(f"  narrowed to {len(regions)} regions using a "
+                      f"{window:.0f}s window, {covered / 60:.1f} min of "
+                      f"{runtime_s / 60:.1f} min "
+                      f"({covered / max(1.0, runtime_s) * 100:.0f}% of the film)")
 
         shots = None
         if settings.refine_shots:
@@ -348,7 +377,8 @@ def run(
 
         def grab(entry: dict) -> bool:
             return _extract_keyframe(
-                source, entry["keyframe_s"], keyframe_dir / entry["keyframe"]
+                source, entry["keyframe_s"], keyframe_dir / entry["keyframe"],
+                settings.keyframe_fit,
             )
 
         with ThreadPoolExecutor(max_workers=max(1, settings.keyframe_workers)) as pool:
@@ -448,6 +478,8 @@ def run(
             "content_end_s": content_end,
             "shots": entries,
             "stats": {
+                "whole_film": settings.index_whole_film,
+                "keyframe_fit": settings.keyframe_fit,
                 "region_count": len(regions),
                 "content_start_s": content_start,
                 "content_end_s": content_end,
@@ -472,6 +504,7 @@ def run(
             f"{meta.get('covered_seconds', 0) / 60:.0f} min indexed",
             f"{meta.get('keyframes_ok', 0)} keyframes",
         ]
+        bits.append("whole film" if meta.get("whole_film") else "narrowed")
         bits.append("refined" if meta.get("refined") else "coarse boundaries")
         if meta.get("embedded"):
             bits.append(f"{meta['embedded']} embedded")

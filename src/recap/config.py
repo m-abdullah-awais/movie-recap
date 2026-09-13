@@ -229,10 +229,33 @@ class Settings:
     # last one.
     credits_lead_in_s: float = 10.0
     credits_lead_out_s: float = 20.0
+
+    # Index every shot in the film rather than only those near a narration
+    # anchor. Narrowing was a speed optimisation and it capped retrieval quality
+    # badly: shrinking the window to hit a coverage target left roughly three
+    # candidate shots per line, so the timestamp effectively chose the footage
+    # and CLIP only broke ties between near-duplicates. Worse, the window is
+    # centred on an anchor that Claude inferred from subtitle timings, so an
+    # anchor off by half a minute put every candidate in the wrong scene with no
+    # way to recover. Searching the whole film lets a good visual match win from
+    # anywhere, with time reduced to a preference in the scoring rather than a
+    # gate. It costs a few more minutes of keyframe extraction and embedding.
+    index_whole_film: bool = True
+
+    # How a frame is fitted to CLIP's square input. Cropping is what CLIP's own
+    # preprocessing does, but on a 1920x1080 frame it keeps only the middle 224
+    # of 398 pixels and throws away 44 percent of the width, which in widescreen
+    # film often contains the subject. Padding keeps the whole frame at the cost
+    # of some detail and black bars.
+    keyframe_fit: str = "pad"
+
     index_window_s: float = 90.0
     index_target_coverage: float = 0.30
     index_min_window_s: float = 5.0
-    index_max_shots: int = 900
+    # Raised because the whole film is indexed now. Embedding is cheap, about a
+    # tenth of a second per shot, so the cap exists only to stop something
+    # pathological rather than to save meaningful time.
+    index_max_shots: int = 3000
     # Refinement with PySceneDetect inside the narrowed regions is off by
     # default. Measured on the 94 minute film it cost 6 minutes 54 seconds and
     # found 24 extra shots out of 243, because the regions are only a few seconds
