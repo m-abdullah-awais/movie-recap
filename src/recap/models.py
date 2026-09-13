@@ -12,8 +12,6 @@ than the pipeline stopping.
 from __future__ import annotations
 
 import os
-import shutil
-import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -63,33 +61,27 @@ CLIP_FILES = {
         "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/tokenizer.json",
 }
 
-# Piper voices come from a GitHub release rather than Hugging Face. They are the
-# same assets, and GitHub stays reachable on networks where Hugging Face rate
-# limits, which was the case on this machine.
+# Kokoro is the only speech engine. It carries around fifty voices in one model
+# rather than one file per voice, so switching narrator or sampling a dozen of
+# them costs nothing once the model is present.
 #
-# Keyed by the voice name so the narrator can be changed without touching code.
-# ryan is male, lessac is female; medium is the quality tier that narrates
-# clearly without the synthesis cost of high.
-_RELEASE = "https://github.com/rhasspy/piper/releases/download/v0.0.2/"
-PIPER_VOICES = {
-    "en_US-ryan-medium": _RELEASE + "voice-en-us-ryan-medium.tar.gz",
-    "en_US-ryan-high": _RELEASE + "voice-en-us-ryan-high.tar.gz",
-    "en_US-ryan-low": _RELEASE + "voice-en-us-ryan-low.tar.gz",
-    "en_US-danny-low": _RELEASE + "voice-en-us-danny-low.tar.gz",
-    "en_US-lessac-medium": _RELEASE + "voice-en-us-lessac-medium.tar.gz",
-    "en_US-lessac-low": _RELEASE + "voice-en-us-lessac-low.tar.gz",
-    "en_US-amy-low": _RELEASE + "voice-en-us-amy-low.tar.gz",
-    "en_US-kathleen-low": _RELEASE + "voice-en-us-kathleen-low.tar.gz",
-}
-
 # A male narrator, which is what this project wants for recap voiceover.
-DEFAULT_PIPER_VOICE = "en_US-ryan-medium"
+DEFAULT_VOICE = "am_liam"
 
-# Kokoro carries around fifty voices in one model rather than one file per
-# voice, which is why it is worth having alongside Piper: sampling a dozen
-# narrators costs nothing once the model is present. Voice names are prefixed
-# "kokoro:" everywhere so the two engines cannot be confused.
-KOKORO_PREFIX = "kokoro:"
+_LEGACY_PREFIX = "kokoro:"
+
+
+def voice_name(name: str) -> str:
+    """The bare voice name.
+
+    Voices were once written "kokoro:am_liam" to tell them apart from Piper's,
+    which had its own naming. Piper has been removed, so the prefix is stripped
+    rather than rejected, and an old name still resolves.
+    """
+    name = name.strip()
+    if name.startswith(_LEGACY_PREFIX):
+        name = name[len(_LEGACY_PREFIX):]
+    return name or DEFAULT_VOICE
 
 
 @dataclass(frozen=True)
@@ -225,84 +217,3 @@ def ensure_clip(*, quiet: bool = False, attempts: int = 4) -> ClipAssets | None:
             print(f"  CLIP model unavailable: {exc}")
         return None
     return clip_paths()
-
-
-@dataclass(frozen=True)
-class PiperVoice:
-    model: Path
-    config: Path
-    name: str
-
-
-def piper_paths(name: str | None = None) -> PiperVoice:
-    voice_name = name or DEFAULT_PIPER_VOICE
-    voice_dir = MODELS_DIR / "piper"
-    return PiperVoice(
-        model=voice_dir / f"{voice_name}.onnx",
-        config=voice_dir / f"{voice_name}.onnx.json",
-        name=voice_name,
-    )
-
-
-def piper_available(name: str | None = None) -> bool:
-    voice = piper_paths(name)
-    return voice.model.is_file() and voice.config.is_file()
-
-
-def ensure_piper_voice(
-    *, name: str | None = None, quiet: bool = False, attempts: int = 4
-) -> PiperVoice | None:
-    """Fetch and unpack a Piper voice, or return None so the caller can degrade."""
-    voice = piper_paths(name)
-    if piper_available(voice.name):
-        return voice
-
-    url = PIPER_VOICES.get(voice.name)
-    if url is None:
-        if not quiet:
-            print(f"  unknown voice {voice.name}. Known: {', '.join(sorted(PIPER_VOICES))}")
-        return None
-
-    voice_dir = voice.model.parent
-    # Named per voice, so fetching a second narrator does not collide with a
-    # partial download of the first.
-    archive = voice_dir / f"{voice.name}.tar.gz"
-    try:
-        if not archive.is_file():
-            if not quiet:
-                print(f"  fetching the {voice.name} voice, about 58 MB")
-            download(url, archive, attempts=attempts, timeout=600.0)
-    except DownloadFailed as exc:
-        if not quiet:
-            print(f"  Piper voice unavailable: {exc}")
-        return None
-
-    # The archive nests the two files under a directory, so they are pulled out
-    # by suffix rather than by an assumed path.
-    try:
-        with tarfile.open(archive, "r:gz") as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                if member.name.endswith(".onnx"):
-                    _extract_to(tar, member, voice.model)
-                elif member.name.endswith(".onnx.json"):
-                    _extract_to(tar, member, voice.config)
-    except (tarfile.TarError, OSError) as exc:
-        if not quiet:
-            print(f"  the voice archive could not be unpacked: {exc}")
-        return None
-
-    if not piper_available(voice.name):
-        return None
-    archive.unlink(missing_ok=True)
-    return voice
-
-
-def _extract_to(tar: tarfile.TarFile, member: tarfile.TarInfo, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    source = tar.extractfile(member)
-    if source is None:
-        return
-    with source, target.open("wb") as handle:
-        shutil.copyfileobj(source, handle)

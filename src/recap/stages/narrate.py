@@ -22,29 +22,28 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "narrate"
-VERSION = 4  # bumped: Kokoro engine, with its own speaking rate
+VERSION = 5  # bumped: Kokoro only, Piper removed
 
 NARRATION_FILE = "narration.json"
 AUDIO_DIR = "audio"
 
 PARAM_NAMES = (
-    "piper_voice", "narrate_gap_s", "piper_length_scale", "kokoro_speed",
-    "script_words_per_minute",
+    "voice", "narrate_gap_s", "kokoro_speed", "script_words_per_minute",
 )
 
 
 class NoVoice(RuntimeError):
-    """Neither Piper nor the system voice could speak."""
+    """Neither Kokoro nor the system voice could speak."""
 
 
-def text_key(text: str, voice: str, length_scale: float) -> str:
+def text_key(text: str, voice: str, speed: float) -> str:
     """Cache key for one spoken line.
 
     The voice and the speaking rate are folded in, because the same words in a
     different voice or at a different rate are a different audio file with a
     different duration.
     """
-    blob = f"{voice}:{length_scale}:{text}".encode("utf-8")
+    blob = f"{voice}:{speed}:{text}".encode("utf-8")
     return hashlib.blake2b(blob, digest_size=8).hexdigest()
 
 
@@ -57,58 +56,6 @@ def wav_seconds(path: Path) -> float:
             return frames / float(rate)
     except (wave.Error, OSError):
         return 0.0
-
-
-class PiperSpeaker:
-    """Piper text to speech, as specified for this project."""
-
-    def __init__(self, voice: models.PiperVoice, length_scale: float):
-        try:
-            from piper import PiperVoice as Loader
-        except ImportError as exc:
-            raise NoVoice("the piper-tts package is not installed") from exc
-
-        try:
-            self._voice = Loader.load(str(voice.model), config_path=str(voice.config))
-        except TypeError:
-            # Older releases take the config positionally.
-            self._voice = Loader.load(str(voice.model), str(voice.config))
-        except Exception as exc:  # noqa: BLE001
-            raise NoVoice(f"the Piper voice could not be loaded: {exc}") from exc
-
-        self.name = voice.name
-
-        # The speaking rate has to be handed to each synthesis call. Holding it
-        # on the object does nothing, which is how the voice ended up narrating
-        # at 200 words per minute when 150 to 170 is the readable range.
-        self._config = None
-        try:
-            from piper import SynthesisConfig
-
-            self._config = SynthesisConfig(length_scale=length_scale)
-        except ImportError:
-            pass
-
-    def speak(self, text: str, target: Path) -> bool:
-        """Write one spoken line to a wav file.
-
-        The synthesis entry point and its options changed between Piper
-        releases, so the call degrades from the configured form to the bare one
-        rather than pinning to a single version.
-        """
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with wave.open(str(target), "wb") as handle:
-                if self._config is not None:
-                    self._voice.synthesize_wav(text, handle, syn_config=self._config)
-                elif hasattr(self._voice, "synthesize_wav"):
-                    self._voice.synthesize_wav(text, handle)
-                else:
-                    self._voice.synthesize(text, handle)
-        except Exception:  # noqa: BLE001 - a single bad line must not stop the run
-            target.unlink(missing_ok=True)
-            return False
-        return target.is_file() and target.stat().st_size > 0
 
 
 class KokoroSpeaker:
@@ -130,11 +77,10 @@ class KokoroSpeaker:
             raise NoVoice(f"the Kokoro model could not be loaded: {exc}") from exc
 
         self._voice = voice
-        # Taken as given, not converted from Piper's length scale. The two
-        # engines run at different baseline paces as well as using opposite
-        # conventions, so the reciprocal produced 96 words per minute.
+        # Larger is faster here. Measured on am_michael: 0.9 gives 143 words per
+        # minute, 1.0 gives 154, and 1.3 gives 190.
         self._speed = speed if speed > 0 else 1.0
-        self.name = models.KOKORO_PREFIX + voice
+        self.name = voice
 
     def voices(self) -> list[str]:
         try:
@@ -174,8 +120,8 @@ class SystemSpeaker:
     """Windows' built-in speech synthesiser.
 
     A documented fallback, not a preference. It is markedly more robotic than
-    Piper, but it needs no download at all, so a film can still be finished on a
-    machine where the voice model cannot be fetched.
+    Kokoro, but it needs no download at all, so a film can still be finished on
+    a machine where the voice model cannot be fetched.
     """
 
     name = "windows-sapi"
@@ -205,51 +151,36 @@ class SystemSpeaker:
 
 
 def make_speaker(settings: Settings, quiet: bool):
-    """The configured engine, falling back through Piper to the system voice.
+    """Kokoro, falling back to the system voice.
 
-    A name prefixed "kokoro:" selects Kokoro, anything else is a Piper voice.
-    Both fall back rather than fail, because a missing narrator should not throw
-    away the stages that already succeeded.
+    It falls back rather than failing, because a missing narrator should not
+    throw away the stages that already succeeded.
     """
-    wanted = settings.piper_voice
-    if wanted.startswith(models.KOKORO_PREFIX):
-        if models.kokoro_available():
-            try:
-                speaker = KokoroSpeaker(
-                    wanted[len(models.KOKORO_PREFIX):],
-                    models.kokoro_paths(),
-                    settings.kokoro_speed,
-                )
-                if not quiet:
-                    print(f"  speaking with Kokoro, voice {speaker.name}")
-                return speaker, None
-            except NoVoice as exc:
-                if not quiet:
-                    print(f"  Kokoro unavailable: {exc}")
-        elif not quiet:
-            print("  the Kokoro model is not in .models, falling back")
-        wanted = models.DEFAULT_PIPER_VOICE
-
-    voice = models.ensure_piper_voice(name=wanted, quiet=quiet, attempts=2)
-    if voice is not None:
+    if models.kokoro_available():
         try:
-            speaker = PiperSpeaker(voice, settings.piper_length_scale)
+            speaker = KokoroSpeaker(
+                models.voice_name(settings.voice),
+                models.kokoro_paths(),
+                settings.kokoro_speed,
+            )
             if not quiet:
-                print(f"  speaking with Piper, voice {speaker.name}")
+                print(f"  speaking with Kokoro, voice {speaker.name}")
             return speaker, None
         except NoVoice as exc:
             if not quiet:
-                print(f"  Piper unavailable: {exc}")
+                print(f"  Kokoro unavailable: {exc}")
+    elif not quiet:
+        print("  the Kokoro model is not in .models, falling back")
 
     try:
         speaker = SystemSpeaker()
     except NoVoice as exc:
         raise NoVoice(
-            "no speech synthesiser is available. Install piper-tts and let the "
-            f"voice download succeed. {exc}"
+            "no speech synthesiser is available. Put the Kokoro model in "
+            f".models, or run fetch-models. {exc}"
         ) from exc
     if not quiet:
-        print("  Piper voice unavailable, falling back to the system voice")
+        print("  Kokoro unavailable, falling back to the system voice")
     return speaker, "system_voice"
 
 
@@ -284,7 +215,9 @@ def run(
         planned = []
         for segment in segments:
             text = str(segment.get("narration") or "").strip()
-            key = text_key(text, settings.piper_voice, settings.piper_length_scale)
+            key = text_key(
+                text, models.voice_name(settings.voice), settings.kokoro_speed
+            )
             planned.append({
                 "segment": segment,
                 "text": text,

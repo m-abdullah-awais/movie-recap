@@ -236,14 +236,16 @@ rem  8  models
 rem ==========================================================
 :opt_models
 call :header "Downloaded models"
-echo  About 210 MB: the CLIP encoders and the Piper voices.
+echo  About 490 MB: the CLIP encoders and the Kokoro voice model.
 echo.
 echo  READ THIS FIRST. Hugging Face is rate limiting this address, so
 echo  the CLIP encoders cannot currently be downloaded again. They came
 echo  from a zip placed in temp by hand. If that zip is gone too, shot
 echo  matching drops back to timing only until the limit clears.
 echo.
-echo  Piper voices come from GitHub and can be fetched again.
+echo  The Kokoro model is not downloaded by this tool either. It was
+echo  copied in by hand, so deleting it leaves the robotic system voice
+echo  until you put it back.
 echo.
 call :confirm "Delete downloaded models anyway"
 if errorlevel 1 goto after
@@ -306,8 +308,8 @@ echo    output           the rendered videos and their subtitle files
 echo    output samples   the generated voice samples
 echo    temp             scratch files, keeping the two sample clips
 echo.
-echo  Kept: the input films, the downloaded models, the Python
-echo  toolchain, and your chosen narrator in .env.
+echo  Kept: the input films, the downloaded models, and the Python
+echo  toolchain.
 echo.
 echo  THIS DELETES YOUR FINISHED RECAPS. They are the point of the
 echo  whole exercise, so move anything worth keeping out of the

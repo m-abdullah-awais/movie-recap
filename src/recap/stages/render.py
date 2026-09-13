@@ -173,9 +173,9 @@ def narration_format(cache: Cache, timeline: list[dict]) -> tuple[int, int]:
     demuxer adopts the parameters of the first file it opens and does not
     resample the rest, so a silence gap generated at a different rate plays at
     the wrong length. That happened here: the gap was produced at the 16 kHz rate
-    used for speech recognition input while Piper writes 22050 Hz, so every 0.35
-    second gap ran for 0.254 seconds and the track finished 7.3 seconds short of
-    what every other stage believed.
+    used for speech recognition input while the speech engine writes its own, so
+    every 0.35 second gap ran for 0.254 seconds and the track finished 7.3
+    seconds short of what every other stage believed.
     """
     for entry in timeline:
         wav = cache.dir / str(entry.get("wav") or "")

@@ -9,7 +9,7 @@ otherwise cache model weights under the user profile.
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # src/recap/config.py -> src/recap -> src -> project root
@@ -65,41 +65,6 @@ def discover_input(input_dir: Path | None = None) -> list[Path]:
     return sorted(found, key=lambda p: p.stat().st_size, reverse=True)
 
 
-ENV_FILE = ROOT / ".env"
-NEWLINE = "\n"
-
-
-def load_env_file(path: Path | None = None) -> list[str]:
-    """Read `KEY=value` lines from the project's own .env file.
-
-    Credentials belong to this directory, not to the user profile. Putting a
-    Hugging Face token in .env keeps it inside the project, where .gitignore
-    already excludes it, so nothing has to be written to a shared location to
-    authenticate.
-
-    Existing environment variables win, so a value exported in the shell still
-    overrides the file.
-    """
-    target = path or ENV_FILE
-    loaded: list[str] = []
-    try:
-        text = target.read_text(encoding="utf-8")
-    except OSError:
-        return loaded
-
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and value and not os.environ.get(key):
-            os.environ[key] = value
-            loaded.append(key)
-    return loaded
-
-
 def contain_environment() -> None:
     """Force every redirected location into the project directory.
 
@@ -112,28 +77,6 @@ def contain_environment() -> None:
 
 
 contain_environment()
-
-# Loaded after containment so a token in .env reaches every stage, while the
-# redirected cache locations above can never be overridden from a file.
-load_env_file()
-
-
-def set_env_value(key: str, value: str, path: Path | None = None) -> None:
-    """Store one setting in the project's .env, replacing any existing line.
-
-    Written here rather than to a user-level config so a chosen narrator stays
-    inside this directory like everything else.
-    """
-    target = path or ENV_FILE
-    lines: list[str] = []
-    if target.is_file():
-        lines = [
-            line for line in target.read_text(encoding="utf-8").splitlines()
-            if not line.strip().startswith(f"{key}=")
-        ]
-    lines.append(f"{key}={value}")
-    target.write_text(NEWLINE.join(lines) + NEWLINE, encoding="utf-8")
-    os.environ[key] = value
 
 
 def is_contained(path: str | os.PathLike[str]) -> bool:
@@ -269,30 +212,18 @@ class Settings:
 
     # Stage 7, narrate.
     #
-    # A short gap between lines stops the narration sounding rushed and gives the
-    # render a natural place to change shot. Length scale is Piper's speaking
-    # rate, where above 1.0 is slower.
-    # A male narrator by default. Piper's ryan is male, lessac is female. The
-    # name must be one of the keys in models.PIPER_VOICES.
-    #
-    # Read from RECAP_VOICE when set, which the voices command writes into the
-    # project's .env. That keeps a chosen narrator across runs without editing
-    # code, and keeps the choice inside this directory.
-    piper_voice: str = field(
-        default_factory=lambda: os.environ.get("RECAP_VOICE", "kokoro:am_liam")
-    )
-    # Kokoro's own rate, not derived from Piper's. Larger is faster here, the
-    # opposite of length_scale, and its baseline pace differs, so converting
-    # between them gave 96 words per minute where 150 to 170 reads well.
-    # Measured on am_michael: 0.9 gives 143 wpm, 1.0 gives 154, 1.3 gives 190.
+    # The narrator, chosen from spoken samples. Every Kokoro voice lives in the
+    # one model, so the name is all that changes: run the voices command to hear
+    # the alternatives, then edit this line. It is set here rather than in a
+    # configuration file because this project deliberately has none.
+    voice: str = "am_liam"
+    # Larger is faster. Measured on am_michael: 0.9 gives 143 words per minute,
+    # 1.0 gives 154, and 1.3 gives 190, where 150 to 170 reads well for
+    # something a viewer listens to for a quarter of an hour.
     kokoro_speed: float = 1.0
+    # A short gap between lines stops the narration sounding rushed and gives
+    # the render a natural place to change shot.
     narrate_gap_s: float = 0.35
-    # Above 1.0 is slower, and the response is not linear in words per minute.
-    # Measured on the Lessac medium voice: 1.0 gives 205 wpm, 1.6 gives 170, and
-    # 2.0 gives 134. Its default rate is rushed for something a viewer listens to
-    # for a quarter of an hour, so 1.6 lands in the usual recap range while
-    # keeping the video near fifteen minutes.
-    piper_length_scale: float = 1.6
     narrate_workers: int = 2
 
     # Stage 8, select.

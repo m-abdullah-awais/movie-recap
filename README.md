@@ -30,7 +30,7 @@ needed.
 | 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
 | 5 | `script` | Claude turns the story into narration segments with visual queries | Built |
 | 6 | `index` | Keyframes and CLIP embeddings, restricted to relevant regions | Built |
-| 7 | `narrate` | Kokoro or Piper text to speech, cached by text hash | Built |
+| 7 | `narrate` | Kokoro text to speech, cached by text hash | Built |
 | 8 | `select` | Score and pick shots for each narration segment | Built |
 | 9 | `render` | ffmpeg assembles the final video from the original | Built |
 
@@ -249,30 +249,28 @@ three seconds.
 
 ### Choosing a narrator
 
-Two speech engines are supported. Kokoro carries around fifty voices in a single
-model, twenty eight of them English across American and British, male and female.
-Piper uses one file per voice, about 58 MB each. Kokoro is the default because
-sampling a dozen narrators costs nothing once its model is present, while each
-Piper voice is a separate download.
+Speech is Kokoro, and only Kokoro. It carries around fifty voices in a single
+model, twenty eight of them English across American and British, male and female,
+so sampling a dozen narrators or switching between them downloads nothing once
+the model is present. The default is `am_liam`, a male American voice.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\analyze.py voices
 .\.venv\Scripts\python.exe scripts\analyze.py voices --sample
 .\.venv\Scripts\python.exe scripts\analyze.py voices --sample --all
-.\.venv\Scripts\python.exe scripts\analyze.py voices --use kokoro:am_liam
 ```
 
 Samples all read the same line, which is the only fair way to compare them, and
-each reports its measured words per minute. The chosen voice is written to `.env`
-so it survives across runs without editing code. Changing it re-runs only
+each reports its measured words per minute. The narrator is then set in code, as
+`voice` in `src\recap\config.py`, because the project keeps no configuration
+file: there is nothing to copy, fill in or lose. Changing it re-runs only
 narrate, select and render.
 
-Each engine has its own rate setting rather than a shared one. Piper's
-`length_scale` means slower as it grows, Kokoro's `speed` means faster, and their
-baseline paces differ, so converting between them produced 96 words per minute
-where 150 to 170 reads well. Both are calibrated against measurement: Piper at
-1.6 gives about 148, Kokoro at 1.0 gives about 154, and individual voices vary
-from 140 to 193 at the same setting.
+The speaking rate is `kokoro_speed`, where larger is faster. It is calibrated
+against measurement rather than assumption: 0.9 gives about 143 words per minute,
+1.0 about 154, and 1.3 about 190, while individual voices vary from 140 to 193 at
+the same setting. The default of 1.0 sits in the 150 to 170 range that reads well
+for something a viewer listens to for a quarter of an hour.
 
 ### Speaking, then choosing footage
 
@@ -283,12 +281,6 @@ line, which is why no forced aligner is needed anywhere.
 Each line is cached by the hash of its own text and the speaking rate, so editing
 one segment re-speaks only that segment and two identical lines are synthesised
 once.
-
-Speaking rate needed calibrating against measurement rather than assumption. The
-Lessac medium voice runs at about 205 words per minute at its default, which is
-rushed. The response to the length scale is not linear: 1.6 gives roughly 170,
-and 2.0 drops to 134. The default of 1.6 measured 154.8 words per minute on a
-real script.
 
 Footage for each line spans the spoken seconds plus the silence that follows it.
 Covering only the spoken part would leave the video one gap per line shorter than
@@ -447,7 +439,6 @@ Cleanup.bat             delete reclaimable files, one category at a time
 README.md               this document
 pyproject.toml          dependencies, pinned to Python 3.11
 uv.lock                 the resolved dependency versions
-.env.example            template for the project-local .env
 scripts/
   analyze.py            command line entry point
   setup.ps1             project-scoped bootstrap

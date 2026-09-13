@@ -23,10 +23,10 @@ output/
 input/*
 !input/README.md
 
-# Environment
+# Environment. This project keeps no .env, everything is set in code, but
+# the pattern stays so a stray one can never be committed.
 .env
 .env.*
-!.env.example
 
 # Dependencies
 node_modules/

@@ -663,6 +663,10 @@ def info(
     print(f"\n  dialogue source would be: {plan}")
 
 
+# Where the narrator is set. There is no configuration file to point at, so the
+# advice printed after sampling names the source line the user has to edit.
+_SETTINGS_FILE = "src\\recap\\config.py"
+
 # The sample line every voice reads, so comparisons are like for like.
 SAMPLE_LINE = (
     "Some readers call Jules Verne a novelist. A small society of believers "
@@ -694,87 +698,45 @@ def voices(
     everything: bool = typer.Option(
         False, "--all", help="Sample female voices too, not just male."
     ),
-    use: Optional[str] = typer.Option(
-        None, "--use", help="Choose a narrator. Saved to .env for future runs."
-    ),
-    get: Optional[str] = typer.Option(
-        None, "--get", help="Download a Piper voice by name, about 58 MB each."
-    ),
 ):
-    """List narrator voices, hear samples, and choose one.
+    """List narrator voices and hear samples.
 
     Samples all read the same line, which is the only fair way to compare them.
-    Kokoro voices are prefixed "kokoro:" and all live in one model, so sampling
-    a dozen costs nothing beyond the synthesis.
+    Every voice lives in the one Kokoro model, so sampling a dozen costs nothing
+    beyond the synthesis and switching narrator downloads nothing.
+
+    The narrator itself is set in code, in ``Settings.voice``, because this
+    project keeps no configuration file.
     """
-    installed = [n for n in sorted(models.PIPER_VOICES) if models.piper_available(n)]
     kokoro = _kokoro_voices()
-    current = Settings().piper_voice
+    current = models.voice_name(Settings().voice)
 
-    if get:
-        if get not in models.PIPER_VOICES:
-            typer.secho(f"unknown voice {get}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(2)
-        print(f"fetching {get}, about 58 MB")
-        voice = models.ensure_piper_voice(name=get, attempts=5)
-        if voice is None:
-            typer.secho("  download failed", fg=typer.colors.RED, err=True)
-            raise typer.Exit(1)
-        print(f"  ready: {voice.name}")
-        installed = [n for n in sorted(models.PIPER_VOICES) if models.piper_available(n)]
-
-    if use:
-        known = (use.startswith(models.KOKORO_PREFIX)
-                 and use[len(models.KOKORO_PREFIX):] in kokoro) or \
-                models.piper_available(use)
-        if not known:
-            typer.secho(
-                f"{use} is not available. Run 'voices' to see the list, or "
-                f"'voices --get {use}' if it is a Piper voice.",
-                fg=typer.colors.RED, err=True,
-            )
-            raise typer.Exit(2)
-        config.set_env_value("RECAP_VOICE", use)
-        typer.secho(f"narrator set to {use}", fg=typer.colors.GREEN)
-        print("Saved to .env. Re-run narrate and the stages after it to hear it.")
-        return
-
-    def mark(name: str) -> str:
-        return "  <- in use" if name == current else ""
-
-    if kokoro:
-        groups = (
-            ("American male", "am_"), ("British male", "bm_"),
-            ("American female", "af_"), ("British female", "bf_"),
+    if not kokoro:
+        typer.secho(
+            f"the Kokoro model is not in {config.MODELS_DIR}, so there are no "
+            "voices to list.",
+            fg=typer.colors.RED, err=True,
         )
-        print("Kokoro voices, all in one model, nothing to download:")
-        for label, prefix in groups:
-            names = [v for v in kokoro if v.startswith(prefix)]
-            if names:
-                print(f"  {label}:")
-                for v in names:
-                    full = models.KOKORO_PREFIX + v
-                    print(f"    {full}{mark(full)}")
-        print()
+        raise typer.Exit(1)
 
-    print("Piper voices installed:")
-    for name in installed:
-        print(f"  {name}{mark(name)}")
-    if not installed:
-        print("  none yet")
-
-    missing = [n for n in sorted(models.PIPER_VOICES) if n not in installed]
-    if missing:
-        print()
-        print("Piper voices available to download, about 58 MB each:")
-        print("  " + ", ".join(missing))
+    groups = (
+        ("American male", "am_"), ("British male", "bm_"),
+        ("American female", "af_"), ("British female", "bf_"),
+    )
+    print("Kokoro voices, all in one model, nothing to download:")
+    for label, prefix in groups:
+        names = [v for v in kokoro if v.startswith(prefix)]
+        if names:
+            print(f"  {label}:")
+            for v in names:
+                print(f"    {v}{'  <- in use' if v == current else ''}")
 
     if not sample:
         print()
         run = entry_point()
         print(f"Hear them:   {run} voices --sample        (male voices)")
         print(f"             {run} voices --sample --all  (every voice)")
-        print(f"Choose one:  {run} voices --use kokoro:am_michael")
+        print(f"Choose one:  set voice in {_SETTINGS_FILE}")
         return
 
     target = config.OUTPUT_DIR / "voice-samples"
@@ -784,49 +746,31 @@ def voices(
 
     wanted = list(kokoro) if everything else [v for v in kokoro if v[1] == "m"]
     print()
-    print(f"Writing {len(wanted) + len(installed)} samples to {target}")
+    print(f"Writing {len(wanted)} samples to {target}")
     print("Every voice reads the same line.")
     print()
 
-    if wanted:
-        try:
-            engine = narrate.KokoroSpeaker(
-                wanted[0], models.kokoro_paths(), settings.kokoro_speed
-            )
-        except narrate.NoVoice as exc:
-            typer.secho(f"  Kokoro unavailable: {exc}", fg=typer.colors.YELLOW)
-            engine = None
-        if engine is not None:
-            for voice in wanted:
-                # One model serves every voice, so only the selection changes.
-                engine._voice = voice
-                out = target / f"kokoro-{voice}.wav"
-                if engine.speak(SAMPLE_LINE, out):
-                    seconds = narrate.wav_seconds(out)
-                    print(f"  kokoro:{voice:<16} {seconds:5.1f}s  "
-                          f"{words / (seconds / 60):5.0f} wpm")
-                else:
-                    typer.secho(f"  kokoro:{voice}: could not speak",
-                                fg=typer.colors.YELLOW)
+    try:
+        engine = narrate.KokoroSpeaker(
+            wanted[0], models.kokoro_paths(), settings.kokoro_speed
+        )
+    except narrate.NoVoice as exc:
+        typer.secho(f"  Kokoro unavailable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
 
-    for name in installed:
-        try:
-            speaker = narrate.PiperSpeaker(
-                models.piper_paths(name), settings.piper_length_scale
-            )
-        except narrate.NoVoice as exc:
-            typer.secho(f"  {name}: {exc}", fg=typer.colors.YELLOW)
-            continue
-        out = target / f"{name}.wav"
-        if speaker.speak(SAMPLE_LINE, out):
+    for voice in wanted:
+        # One model serves every voice, so only the selection changes.
+        engine._voice = voice
+        out = target / f"kokoro-{voice}.wav"
+        if engine.speak(SAMPLE_LINE, out):
             seconds = narrate.wav_seconds(out)
-            print(f"  {name:<23} {seconds:5.1f}s  {words / (seconds / 60):5.0f} wpm")
+            print(f"  {voice:<16} {seconds:5.1f}s  {words / (seconds / 60):5.0f} wpm")
         else:
-            typer.secho(f"  {name}: could not speak", fg=typer.colors.YELLOW)
+            typer.secho(f"  {voice}: could not speak", fg=typer.colors.YELLOW)
 
     print()
     print(f"Listen in {target}")
-    print(f"Then pick one with:  {entry_point()} voices --use kokoro:am_michael")
+    print(f"Then set voice in {_SETTINGS_FILE} and re-run narrate onward.")
 
 
 @app.command("fetch-models")
@@ -835,19 +779,23 @@ def fetch_models(
         6, "--attempts", help="How many times to retry a rate limited host."
     ),
 ):
-    """Download the CLIP encoders and the Piper voice into the project.
+    """Download the CLIP encoders into the project.
 
     Separate from the stages so that a rate limited host is waited out here,
     deliberately, rather than in the middle of a pipeline run.
     """
     print(f"models directory: {config.MODELS_DIR}")
 
-    print("\nPiper voice")
-    voice = models.ensure_piper_voice(attempts=attempts)
-    if voice is None:
-        typer.secho("  unavailable", fg=typer.colors.RED)
+    print("\nKokoro voice model")
+    voice = models.kokoro_available()
+    if not voice:
+        typer.secho(
+            "  missing. Put kokoro-v1.0.onnx and voices-v1.0.bin in "
+            f"{config.MODELS_DIR / 'kokoro'}.",
+            fg=typer.colors.RED,
+        )
     else:
-        print(f"  ready: {voice.name}")
+        print("  ready: model and voices")
 
     print("\nCLIP encoders")
     assets = models.ensure_clip(attempts=attempts)
@@ -859,7 +807,7 @@ def fetch_models(
     else:
         print("  ready: vision, text and tokenizer")
 
-    ok = voice is not None and assets is not None
+    ok = voice and assets is not None
     print()
     print("all models present" if ok else "some models are missing, see above")
     raise typer.Exit(0 if ok else 1)
