@@ -327,6 +327,25 @@ class Settings:
     # and the later clips existed to pad out the remaining duration, their
     # relevance falling from 0.785 to 0.690. A continuous run has no ordering to
     # get wrong and nothing to pad.
+    # How a line's footage relates to the stretch of film it narrates.
+    #
+    # "traverse" walks through that stretch, taking a few ordered clips spread
+    # across it. This is the only mode that keeps the picture level with the
+    # words. Measured on the test film, a line describes a median 128 seconds of
+    # plot while its footage showed 10, just 8 percent of the span, so the words
+    # ran through the whole beat while the picture stayed at its opening. That is
+    # why the narration kept arriving before the scene it described.
+    #
+    # "continuous" plays one unbroken run from the start of the beat. Coherent
+    # but it falls steadily behind, because film plays at real speed while
+    # narration compresses about 13 seconds of plot into every second of speech.
+    #
+    # "montage" is the original behaviour, kept only for comparison.
+    footage_mode: str = "traverse"
+    clip_target_s: float = 3.2
+    # An upper bound on the film a single line may travel across, so a sparse
+    # patch of beats does not make one line leap through half the picture.
+    max_span_s: float = 240.0
     continuous_runs: bool = True
     max_run_s: float = 20.0
 

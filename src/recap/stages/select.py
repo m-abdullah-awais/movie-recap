@@ -20,7 +20,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 8  # bumped: consecutive lines on one beat play the scene straight through
+VERSION = 10  # bumped: traversal positions clips without the anchor pulling back
 
 EDL_FILE = "edl.json"
 
@@ -28,6 +28,7 @@ PARAM_NAMES = (
     "clip_weight", "proximity_weight", "band_weight",
     "reuse_penalty", "dark_penalty", "min_clip_s", "max_clip_s",
     "proximity_sigma_s", "dark_luma", "max_shot_uses", "max_shot_distance_s",
+    "footage_mode", "clip_target_s", "max_span_s",
     "continuous_runs", "max_run_s", "similarity_floor",
 )
 
@@ -88,6 +89,127 @@ def quantise(duration: float, fps: float | None) -> tuple[float, float]:
     frames = max(1, int(round(duration * fps)))
     exact = frames / fps
     return exact, (frames + 0.5) / fps
+
+
+def line_spans(lines: list[dict], default_s: float, max_span_s: float) -> list[tuple]:
+    """The stretch of film each line is responsible for showing.
+
+    Anchors mark where a line begins, so a line runs until the next line that
+    starts somewhere else. Lines sharing an anchor, which is two thirds of them,
+    split that stretch between themselves in proportion to how long they are
+    spoken. The result tiles the film in order, so the recap always moves
+    forward and no line shows footage another line has claimed.
+    """
+    spans: list[tuple] = []
+    index = 0
+    while index < len(lines):
+        anchor = _num(lines[index].get("story_time"))
+
+        group = [index]
+        while (group[-1] + 1 < len(lines)
+               and abs(_num(lines[group[-1] + 1].get("story_time")) - anchor) < 0.01):
+            group.append(group[-1] + 1)
+
+        following = group[-1] + 1
+        end = (_num(lines[following].get("story_time"))
+               if following < len(lines) else anchor + default_s)
+        if end <= anchor:
+            end = anchor + default_s
+        end = min(end, anchor + max_span_s)
+
+        total = sum(max(0.1, _num(lines[i].get("seconds"))) for i in group)
+        cursor = anchor
+        for i in group:
+            share = max(0.1, _num(lines[i].get("seconds"))) / total
+            width = (end - anchor) * share
+            spans.append((cursor, cursor + width))
+            cursor += width
+
+        index = following
+    return spans
+
+
+def build_traversal(
+    *,
+    need: float,
+    span: tuple,
+    score: "np.ndarray",
+    uses: "np.ndarray",
+    starts: "np.ndarray",
+    middles: "np.ndarray",
+    durations: "np.ndarray",
+    ceiling: float,
+    content_start: float,
+    content_end: float,
+    similarity: "np.ndarray | None",
+    shots: list[dict],
+    settings: Settings,
+    source_fps: float | None,
+) -> list[dict]:
+    """A few ordered clips spread across the film this line narrates.
+
+    The picture has to keep up with the words. Narration compresses roughly 13
+    seconds of plot into every second of speech, so a line that plays one
+    continuous stretch shows only the opening of what it is describing and
+    everything mentioned afterwards arrives late or never.
+
+    Sampling evenly across the line's span fixes the pacing: at the halfway point
+    of the sentence the picture is at the halfway point of the events. Clips come
+    out in film order by construction, so the sequence still reads forward.
+    """
+    span_start, span_end = span
+    span_start = max(span_start, content_start)
+    span_end = max(span_start + 0.1, min(span_end, content_end, ceiling))
+
+    count = max(1, min(5, int(round(need / max(1.0, settings.clip_target_s)))))
+    piece = need / count
+
+    clips: list[dict] = []
+    taken: list[int] = []
+    floor_time = span_start
+
+    for step in range(count):
+        # Where in the described stretch this clip should sit.
+        target = span_start + (step + 0.5) / count * (span_end - span_start)
+        reach = max(piece, (span_end - span_start) / count)
+
+        local = score - settings.reuse_penalty * uses
+        # Prefer shots near this point in the traversal, and never go backwards.
+        offset = np.abs(middles - target)
+        local = local + settings.proximity_weight * np.exp(
+            -(offset * offset) / (2.0 * max(1.0, reach) ** 2)
+        )
+        local = np.where(starts + durations > floor_time, local, -1e6)
+        local = np.where(offset <= max(reach * 3.0, 20.0), local, -1e6)
+
+        best = int(np.argmax(local))
+        if local[best] <= -1e5:
+            # Nothing usable ahead. Carry straight on from where we are.
+            begin = min(floor_time, max(content_start, content_end - piece))
+        else:
+            begin = max(float(starts[best]), floor_time)
+            taken.append(best)
+
+        want = piece
+        if begin + want > min(ceiling, content_end):
+            begin = max(content_start, min(ceiling, content_end) - want)
+
+        exact, request = quantise(want, source_fps)
+        clips.append({
+            "shot_i": shots[best].get("i", best),
+            "src_start": round(begin, 4),
+            "src_end": round(begin + request, 4),
+            "duration": round(exact, 4),
+            "score": round(float(local[best]), 4),
+            "similarity": (round(float(similarity[best]), 4)
+                           if similarity is not None else None),
+            "target_s": round(target, 2),
+        })
+        floor_time = begin + exact
+
+    for index in taken:
+        uses[index] += 1
+    return clips
 
 
 def build_runs(
@@ -281,6 +403,9 @@ def run(
         # beat picks up from there instead of cutting to somewhere else.
         last_story_time: float | None = None
         last_end: float | None = None
+        # The stretch of film each line is responsible for showing, tiled in
+        # order across the whole recap.
+        spans = line_spans(lines, settings.max_shot_distance_s, settings.max_span_s)
 
         gap_s = _num(narration.get("gap_s"))
         for position, line in enumerate(lines):
@@ -317,12 +442,16 @@ def run(
                 if spread > 1e-6:
                     similarity = (similarity - similarity.min()) / spread
 
-            score = (
+            # How good a shot is, independent of where it sits. Traversal
+            # positions clips itself, so mixing in closeness to the line's
+            # anchor would drag every clip back to the start of the span and
+            # undo the pacing. The other modes add proximity below.
+            quality = (
                 settings.clip_weight * similarity
-                + settings.proximity_weight * proximity
                 + settings.band_weight * bands
                 - settings.dark_penalty * dark
             )
+            score = quality + settings.proximity_weight * proximity
             # Anything at or past the ceiling would show a reveal the narration
             # has not reached. This is a hard exclusion, not a penalty.
             score = np.where(starts <= ceiling, score, -1e6)
@@ -355,7 +484,34 @@ def run(
 
             clips: list[dict] = []
 
-            if settings.continuous_runs:
+            if settings.footage_mode == "traverse":
+                # Bounded by the line's own span rather than by a radius around
+                # the anchor. A 240 second span cannot be served from within 90
+                # seconds of its first moment.
+                span_lo, span_hi = spans[position]
+                in_span = (middles >= span_lo - 10.0) & (middles <= span_hi + 10.0)
+                usable = np.where(in_span, quality, -1e6)
+                usable = np.where(uses < settings.max_shot_uses, usable, -1e6)
+                usable = np.where(starts <= ceiling, usable, -1e6)
+                if not np.any(usable > -1e5):
+                    usable = np.where(starts <= ceiling, quality, -1e6)
+                clips = build_traversal(
+                    need=need,
+                    span=spans[position],
+                    score=usable,
+                    uses=uses,
+                    starts=starts,
+                    middles=middles,
+                    durations=durations,
+                    ceiling=ceiling,
+                    content_start=content_start,
+                    content_end=content_end,
+                    similarity=similarity if use_clip else None,
+                    shots=shots,
+                    settings=settings,
+                    source_fps=source_fps,
+                )
+            elif settings.footage_mode == "continuous":
                 # Only continue when this line narrates the same beat as the
                 # last, otherwise a new beat should cut to its own scene.
                 resume = (last_end if last_story_time is not None
@@ -377,8 +533,10 @@ def run(
                 )
                 last_story_time = story_time
                 last_end = clips[-1]["src_end"] if clips else None
+
+            if clips and settings.footage_mode in ("traverse", "continuous"):
                 for clip in clips:
-                    # Every shot the run passes through counts as used, so a
+                    # Every shot the footage passes through counts as used, so a
                     # later line is nudged away from repeating the same stretch.
                     touched = np.where((starts < clip["src_end"])
                                        & (starts + durations > clip["src_start"]))[0]
@@ -484,7 +642,7 @@ def run(
                     sum(c["duration"] for t in timeline for c in t["clips"]) / clip_count, 2
                 ) if clip_count else 0.0,
                 "used_clip": use_clip,
-                "continuous_runs": settings.continuous_runs,
+                "footage_mode": settings.footage_mode,
                 "weak_matches": weak_matches,
                 "degraded": None if use_clip else "no_clip_similarity",
             },
