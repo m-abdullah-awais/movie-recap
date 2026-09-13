@@ -296,6 +296,12 @@ class Settings:
     # detection and narration timing, so they fall wherever they fall. Copying
     # would shift every clip to an earlier keyframe or emit corrupt leading
     # frames, so the default is a frame accurate re-encode.
+    # No subtitles are ever drawn onto the picture. This controls only whether
+    # the sidecar file is placed next to the published video, and it is off
+    # because players auto-load a subtitle file that shares the video's name and
+    # show it without being asked. The file is still written into the cache, so
+    # it is there if you want it for an upload.
+    publish_subtitles: bool = False
     copy_video: bool = False
     render_height: int = 1080
     render_crf: int = 21

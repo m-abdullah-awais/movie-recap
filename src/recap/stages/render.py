@@ -30,7 +30,7 @@ from ..cache import Cache, StageOutcome, atomic_path, read_json, run_stage, writ
 from ..config import OUTPUT_DIR, Settings
 
 STAGE = "render"
-VERSION = 6  # bumped: gap at the narration rate, final video written atomically
+VERSION = 7  # bumped: no subtitle file published beside the video
 
 FINAL_FILE = "final.mp4"
 # Written here first, then moved into place. See the note in run(). The .mp4
@@ -47,6 +47,7 @@ SILENCE_WAV_FMT = "gap_{rate}hz.wav"
 PARAM_NAMES = (
     "render_height", "render_crf", "qsv_quality", "allow_qsv", "copy_video",
     "duck_threshold", "duck_ratio", "narration_gain", "source_gain",
+    "publish_subtitles",
 )
 
 
@@ -60,7 +61,9 @@ def safe_name(text: str, fallback: str = "recap") -> str:
     return cleaned[:90] or fallback
 
 
-def publish(final: Path, subtitles: Path, title: str) -> tuple[Path, Path]:
+def publish(
+    final: Path, subtitles: Path, title: str, with_subtitles: bool = False
+) -> tuple[Path, Path | None]:
     """Place the finished video in output/ under a timestamped name.
 
     A hard link is used where the filesystem allows it, so a 300 MB video is not
@@ -79,9 +82,16 @@ def publish(final: Path, subtitles: Path, title: str) -> tuple[Path, Path]:
     stem = f"{safe_name(title)} - {stamp}"
 
     video = OUTPUT_DIR / f"{stem}.mp4"
-    caption = OUTPUT_DIR / f"{stem}.srt"
+    caption = OUTPUT_DIR / f"{stem}.srt" if with_subtitles else None
 
-    for source, destination in ((final, video), (subtitles, caption)):
+    # A subtitle file sharing the video's name is picked up and displayed
+    # automatically by most players, which is subtitles on screen whether or not
+    # anything was burned in. It is left in the cache instead unless asked for.
+    pairs = [(final, video)]
+    if caption is not None:
+        pairs.append((subtitles, caption))
+
+    for source, destination in pairs:
         if not source.is_file():
             continue
         destination.unlink(missing_ok=True)
@@ -433,15 +443,22 @@ def run(
                 title = read_json(script_path).get("title") or title
             except Exception:  # noqa: BLE001 - a missing title is not a failure
                 pass
-        published, published_srt = publish(final, cache.path(SUBTITLE_FILE), title)
+        published, published_srt = publish(
+            final, cache.path(SUBTITLE_FILE), title, settings.publish_subtitles
+        )
         if not quiet:
             print(f"  published to output\\{published.name}")
+            if published_srt is None:
+                print("  no subtitle file alongside it, so nothing appears on screen")
 
         return {
             "final": FINAL_FILE,
             "subtitles": SUBTITLE_FILE,
             "published": str(published.relative_to(published.parents[1])),
-            "published_srt": str(published_srt.relative_to(published_srt.parents[1])),
+            "published_srt": (
+                str(published_srt.relative_to(published_srt.parents[1]))
+                if published_srt is not None else None
+            ),
             "subtitle_count": subtitle_count,
             "clip_count": clip_count,
             "line_count": len(timeline),

@@ -563,6 +563,10 @@ def render_stage(
         False, "--copy-video",
         help="Stream copy instead of re-encoding. Faster, but clips snap to keyframes.",
     ),
+    with_subtitles: bool = typer.Option(
+        False, "--with-subtitles",
+        help="Also place the subtitle file beside the video. Players will show it.",
+    ),
     no_qsv: bool = NoQsvOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     quiet: bool = QuietOpt,
@@ -574,6 +578,8 @@ def render_stage(
         changes["copy_video"] = True
     if no_qsv:
         changes["allow_qsv"] = False
+    if with_subtitles:
+        changes["publish_subtitles"] = True
     if changes:
         settings = dataclasses.replace(settings, **changes)
     movie, cache, probe_data, duration = _open(movie, cache_dir)

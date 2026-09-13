@@ -316,6 +316,14 @@ The audio track is chosen by ordinal among audio streams, not by original stream
 index, because the concat demuxer renumbers them. On a dual-audio film this is
 the difference between the intended language and the wrong one.
 
+Nothing is ever drawn onto the picture. The render maps only the video stream and
+the mixed audio, and there is no burn-in filter anywhere in the pipeline.
+
+The subtitle file is written into the cache but is not placed beside the
+published video, because players auto-load a subtitle file that shares the
+video's name and display it unasked, which amounts to subtitles on screen even
+though none were burned in. Pass `--with-subtitles` to publish it alongside.
+
 Subtitles are timed to the spoken duration, not to the footage allotted to the
 line. The footage also covers the silence that follows, so using it would hold
 each caption on screen through the gap and butt it against the next.
@@ -403,7 +411,7 @@ Written to `cache/<source_id>/`.
 | `voice-samples/` | voices | One sample per narrator, in the output folder |
 | `edl.json` | select | Edit decision list, clips chosen per line |
 | `final.mp4` | render | The finished recap video |
-| `subtitle.srt` | render | Narration subtitles, sidecar rather than burned in |
+| `subtitle.srt` | render | Narration subtitles, kept in the cache, never burned in |
 | `timings.json` | all | Per-stage timings for every run |
 
 ## Project layout
