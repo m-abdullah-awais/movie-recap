@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json as jsonlib
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -140,7 +141,56 @@ def _validate_stages(names: list[str] | None) -> list[str] | None:
     return names
 
 
-def _run_ingest(cache, movie, probe_data, settings, report, *, force_all, force_stages, quiet):
+class Progress:
+    """Prints each stage's heading before it runs and its result after.
+
+    The final timing table only appears at the end, which is no help during a
+    twenty minute run. This gives a line per stage as it happens, with the time
+    that stage took and the time spent so far, so it is always clear how much is
+    done and how much is left.
+    """
+
+    def __init__(self, report: Report, total: int, quiet: bool):
+        self.report = report
+        self.total = total
+        self.quiet = quiet
+        self.index = 0
+        self.started = time.monotonic()
+
+    def start(self, name: str, note: str = "") -> None:
+        self.index += 1
+        if self.quiet:
+            return
+        label = f"[{self.index}/{self.total}] {name}"
+        print()
+        print(f"{label}{'  ' + note if note else ''}")
+
+    def skip(self, name: str, why: str) -> None:
+        self.index += 1
+        if not self.quiet:
+            print()
+            print(f"[{self.index}/{self.total}] {name}  skipped, {why}")
+
+    def done(self, outcome: StageOutcome) -> StageOutcome:
+        self.report.add(outcome)
+        if self.quiet:
+            return outcome
+        word = {"hit": "cached", "computed": "done", "failed": "FAILED"}.get(
+            outcome.status, outcome.status
+        )
+        elapsed = time.monotonic() - self.started
+        detail = f"  {outcome.summary}" if outcome.summary else ""
+        line = (f"      {word} in {format_hms(outcome.seconds)}"
+                f"   elapsed {format_hms(elapsed)}{detail}")
+        if outcome.failed:
+            typer.secho(line, fg=typer.colors.RED)
+        else:
+            print(line)
+        return outcome
+
+
+def _run_ingest(cache, movie, probe_data, settings, report, *, force_all,
+                force_stages, quiet, progress=None):
     """Ingest, pulling the proxy forward when speech recognition is needed.
 
     Subtitle extraction needs nothing, but recognition needs the proxy audio, so
@@ -185,7 +235,10 @@ def _run_ingest(cache, movie, probe_data, settings, report, *, force_all, force_
             cache, movie, probe_data, settings,
             force=_forced("proxy", force_all, force_stages), quiet=quiet,
         )
-        report.add(proxy_outcome)
+        if progress is not None:
+            progress.done(proxy_outcome)
+        else:
+            report.add(proxy_outcome)
         try:
             outcome = attempt(wav)
         except RuntimeError as exc:
@@ -193,7 +246,10 @@ def _run_ingest(cache, movie, probe_data, settings, report, *, force_all, force_
     except RuntimeError as exc:
         outcome = failed(exc)
 
-    report.add(outcome)
+    if progress is not None:
+        progress.done(outcome)
+    else:
+        report.add(outcome)
     return outcome, proxy_outcome
 
 
@@ -220,25 +276,26 @@ def run_all(
         print(f"{movie.name}  ({format_hms(duration)}, source id {cache.sid[:12]})")
         print(f"cache: {cache.dir}")
 
-    if not quiet:
-        print("\n[1/9] ingest")
+    steps = Progress(report, 9, quiet)
+
+    steps.start("ingest", "reading the film's dialogue")
     ingest_outcome, proxy_outcome = _run_ingest(
         cache, movie, probe_data, settings, report,
-        force_all=force, force_stages=force_stage, quiet=quiet,
+        force_all=force, force_stages=force_stage, quiet=quiet, progress=steps,
     )
 
     if proxy_outcome is None:
-        if not quiet:
-            print("\n[2/9] proxy")
-        proxy_outcome = proxy.run(
+        steps.start("proxy", "reading the film once, the longest stage")
+        steps.done(proxy.run(
             cache, movie, probe_data, settings,
             force=_forced("proxy", force, force_stage), quiet=quiet,
-        )
-        report.add(proxy_outcome)
+        ))
+        proxy_outcome = report.outcomes[-1]
+    else:
+        steps.index += 1  # the proxy already ran, pulled forward by ingest
 
-    if not quiet:
-        print("\n[3/9] scenemap")
-    report.add(scenemap.run(
+    steps.start("scenemap", "finding the shot boundaries")
+    steps.done(scenemap.run(
         cache, proxy_outcome.meta, settings,
         force=_forced("scenemap", force, force_stage), quiet=quiet,
     ))
@@ -246,104 +303,85 @@ def run_all(
     # Stage 4 needs dialogue. When ingest could not produce any there is nothing
     # to read, so it is skipped rather than reported as a failure.
     if ingest_outcome.failed:
-        if not quiet:
-            print("\n[4/9] story  skipped, no dialogue was obtained")
+        steps.skip("story", "no dialogue was obtained")
     else:
-        if not quiet:
-            print("\n[4/9] story")
+        steps.start("story", "Claude reads the plot")
         try:
-            report.add(story.run(
+            steps.done(story.run(
                 cache, settings,
                 force=_forced("story", force, force_stage), quiet=quiet,
             ))
         except (RuntimeError, claude.ClaudeUnavailable) as exc:
-            if not quiet:
-                typer.secho("  story did not complete, continuing", fg=typer.colors.YELLOW)
-            report.add(StageOutcome("story", "failed", 0.0, {}, "no story built", str(exc)))
+            steps.done(StageOutcome("story", "failed", 0.0, {}, "no story built", str(exc)))
 
     # Stage 5 narrates the story, so it only runs when there is one to narrate.
     if cache.path(story.STORY_FILE).is_file():
-        if not quiet:
-            print("\n[5/9] script")
+        steps.start("script", "Claude writes the narration")
         try:
-            report.add(script.run(
+            steps.done(script.run(
                 cache, settings,
                 force=_forced("script", force, force_stage), quiet=quiet,
             ))
         except (RuntimeError, claude.ClaudeUnavailable) as exc:
-            if not quiet:
-                typer.secho("  script did not complete", fg=typer.colors.YELLOW)
-            report.add(
+            steps.done(
                 StageOutcome("script", "failed", 0.0, {}, "no script written", str(exc))
             )
-    elif not quiet:
-        print("\n[5/9] script  skipped, no story to narrate")
+    else:
+        steps.skip("script", "no story to narrate")
 
     # Stage 6 indexes the regions the script points at, so it needs a script.
     if cache.path(script.SCRIPT_FILE).is_file():
-        if not quiet:
-            print("\n[6/9] index")
+        steps.start("index", "matching shots to the narration")
         try:
-            report.add(index.run(
+            steps.done(index.run(
                 cache, movie, settings,
                 force=_forced("index", force, force_stage), quiet=quiet,
             ))
         except RuntimeError as exc:
-            if not quiet:
-                typer.secho("  index did not complete", fg=typer.colors.YELLOW)
-            report.add(StageOutcome("index", "failed", 0.0, {}, "no shot index", str(exc)))
-    elif not quiet:
-        print("\n[6/9] index  skipped, no script to index against")
+            steps.done(StageOutcome("index", "failed", 0.0, {}, "no shot index", str(exc)))
+    else:
+        steps.skip("index", "no script to index against")
 
     # Stages 7 to 9 each depend on the previous one having produced its file,
     # so a failure earlier stops the chain without raising.
     if cache.path(index.SHOTS_FILE).is_file():
-        if not quiet:
-            print("\n[7/9] narrate")
+        steps.start("narrate", "speaking the narration")
         try:
-            report.add(narrate.run(
+            steps.done(narrate.run(
                 cache, settings,
                 force=_forced("narrate", force, force_stage), quiet=quiet,
             ))
         except (RuntimeError, narrate.NoVoice) as exc:
-            if not quiet:
-                typer.secho("  narrate did not complete", fg=typer.colors.YELLOW)
-            report.add(StageOutcome(
+            steps.done(StageOutcome(
                 "narrate", "failed", 0.0, {}, "no narration audio", str(exc)))
-    elif not quiet:
-        print("\n[7/9] narrate  skipped, no shot index")
+    else:
+        steps.skip("narrate", "no shot index")
 
     if cache.path(narrate.NARRATION_FILE).is_file():
-        if not quiet:
-            print("\n[8/9] select")
+        steps.start("select", "choosing footage for every line")
         try:
-            report.add(select.run(
+            steps.done(select.run(
                 cache, settings,
                 force=_forced("select", force, force_stage), quiet=quiet,
             ))
         except RuntimeError as exc:
-            if not quiet:
-                typer.secho("  select did not complete", fg=typer.colors.YELLOW)
-            report.add(StageOutcome(
+            steps.done(StageOutcome(
                 "select", "failed", 0.0, {}, "no edit decision list", str(exc)))
-    elif not quiet:
-        print("\n[8/9] select  skipped, no narration audio")
+    else:
+        steps.skip("select", "no narration audio")
 
     if cache.path(select.EDL_FILE).is_file():
-        if not quiet:
-            print("\n[9/9] render")
+        steps.start("render", "encoding the finished video")
         try:
-            report.add(render.run(
+            steps.done(render.run(
                 cache, movie, probe_data, settings,
                 force=_forced("render", force, force_stage), quiet=quiet,
             ))
         except (RuntimeError, ffmpeg.FfmpegError) as exc:
-            if not quiet:
-                typer.secho("  render did not complete", fg=typer.colors.YELLOW)
-            report.add(StageOutcome(
+            steps.done(StageOutcome(
                 "render", "failed", 0.0, {}, "no final video", str(exc)))
-    elif not quiet:
-        print("\n[9/9] render  skipped, no edit decision list")
+    else:
+        steps.skip("render", "no edit decision list")
 
     timings = report.persist(cache.dir)
 
@@ -362,6 +400,13 @@ def run_all(
         return
 
     print("\n" + report.render())
+
+    finished = [o for o in report.outcomes
+                if o.name == "render" and not o.failed and o.meta.get("published")]
+    if finished:
+        print()
+        typer.secho(f"Recap ready:  output\\{Path(finished[0].meta['published']).name}",
+                    fg=typer.colors.GREEN)
     print(f"\nartifacts in {cache.dir}")
     print(f"timings appended to {timings.name}")
 
