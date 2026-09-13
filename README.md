@@ -102,23 +102,21 @@ starting over.
 
 ## Quick start
 
-`Run.bat` walks through every check in order and asks before each step. It runs
-setup itself if the virtual environment is missing.
+Put a film in the `input` folder and run `Run.bat`. It lists what it finds,
+asks which one, and then runs all nine stages to completion with no further
+questions. The finished recap appears in `output`.
 
 ```powershell
 .\Run.bat
+.\Run.bat 2
 ```
 
-It can also take the film up front, and run without asking.
+Passing a number starts straight on that film in the list. Each stage prints
+when it begins and how long it took, so it is always clear what is done and
+what is left. Setup runs automatically if the project has not been set up yet.
 
-```powershell
-.\Run.bat "D:\films\movie.mkv"
-.\Run.bat "D:\films\movie.mkv" -y
-```
-
-The six steps are prerequisites, environment check, a smoke test on two tiny
-generated clips that needs no film, a probe of your film, the full analysis with
-timings, and a cache verification that proves re-runs are free.
+Expect roughly 25 minutes for a 90 minute film on modest hardware. Anything
+already computed is reused, so a repeat run is far quicker.
 
 ## Usage
 
@@ -383,7 +381,7 @@ Written to `cache/<source_id>/`.
 ## Project layout
 
 ```
-Run.bat                 guided test runner
+Run.bat                 pick a film, then run everything
 analyze.py              entry point
 setup.ps1               project-scoped bootstrap
 pyproject.toml          dependencies, pinned to Python 3.11
