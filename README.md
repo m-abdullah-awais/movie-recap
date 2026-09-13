@@ -30,7 +30,7 @@ needed.
 | 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
 | 5 | `script` | Claude turns the story into narration segments with visual queries | Built |
 | 6 | `index` | Keyframes and CLIP embeddings, restricted to relevant regions | Built |
-| 7 | `narrate` | Piper text to speech per segment, cached by text hash | Built |
+| 7 | `narrate` | Kokoro or Piper text to speech, cached by text hash | Built |
 | 8 | `select` | Score and pick shots for each narration segment | Built |
 | 9 | `render` | ffmpeg assembles the final video from the original | Built |
 
@@ -224,6 +224,33 @@ same film it cost 6 minutes 54 seconds and found 24 extra shots out of 243,
 because the regions are short and the existing boundaries already average about
 three seconds.
 
+### Choosing a narrator
+
+Two speech engines are supported. Kokoro carries around fifty voices in a single
+model, twenty eight of them English across American and British, male and female.
+Piper uses one file per voice, about 58 MB each. Kokoro is the default because
+sampling a dozen narrators costs nothing once its model is present, while each
+Piper voice is a separate download.
+
+```powershell
+.\.venv\Scripts\python.exe analyze.py voices
+.\.venv\Scripts\python.exe analyze.py voices --sample
+.\.venv\Scripts\python.exe analyze.py voices --sample --all
+.\.venv\Scripts\python.exe analyze.py voices --use kokoro:am_liam
+```
+
+Samples all read the same line, which is the only fair way to compare them, and
+each reports its measured words per minute. The chosen voice is written to `.env`
+so it survives across runs without editing code. Changing it re-runs only
+narrate, select and render.
+
+Each engine has its own rate setting rather than a shared one. Piper's
+`length_scale` means slower as it grows, Kokoro's `speed` means faster, and their
+baseline paces differ, so converting between them produced 96 words per minute
+where 150 to 170 reads well. Both are calibrated against measurement: Piper at
+1.6 gives about 148, Kokoro at 1.0 gives about 154, and individual voices vary
+from 140 to 193 at the same setting.
+
 ### Speaking, then choosing footage
 
 Narration is spoken before any footage is chosen, and each line is measured. That
@@ -373,6 +400,7 @@ Written to `cache/<source_id>/`.
 | `query_index.npy` | index | Visual query embeddings, when CLIP is available |
 | `narration.json` | narrate | Spoken lines with measured durations and offsets |
 | `audio/` | narrate | One wav per distinct line, named by text hash |
+| `voice-samples/` | voices | One sample per narrator, in the output folder |
 | `edl.json` | select | Edit decision list, clips chosen per line |
 | `final.mp4` | render | The finished recap video |
 | `subtitle.srt` | render | Narration subtitles, sidecar rather than burned in |

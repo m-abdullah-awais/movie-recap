@@ -11,6 +11,7 @@ dependencies = [
     "faster-whisper>=1.1",
     "scenedetect>=0.7.1",
     "piper-tts>=1.8.0",
+    "kokoro-onnx>=0.6.1",
 ]
 
 [tool.uv]

@@ -85,6 +85,31 @@ PIPER_VOICES = {
 # A male narrator, which is what this project wants for recap voiceover.
 DEFAULT_PIPER_VOICE = "en_US-ryan-medium"
 
+# Kokoro carries around fifty voices in one model rather than one file per
+# voice, which is why it is worth having alongside Piper: sampling a dozen
+# narrators costs nothing once the model is present. Voice names are prefixed
+# "kokoro:" everywhere so the two engines cannot be confused.
+KOKORO_PREFIX = "kokoro:"
+
+
+@dataclass(frozen=True)
+class KokoroAssets:
+    model: Path
+    voices: Path
+
+
+def kokoro_paths() -> KokoroAssets:
+    folder = MODELS_DIR / "kokoro"
+    return KokoroAssets(
+        model=folder / "kokoro-v1.0.onnx",
+        voices=folder / "voices-v1.0.bin",
+    )
+
+
+def kokoro_available() -> bool:
+    assets = kokoro_paths()
+    return assets.model.is_file() and assets.voices.is_file()
+
 
 class DownloadFailed(RuntimeError):
     pass

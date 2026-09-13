@@ -9,7 +9,7 @@ otherwise cache model weights under the user profile.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # src/recap/config.py -> src/recap -> src -> project root
@@ -66,6 +66,7 @@ def discover_input(input_dir: Path | None = None) -> list[Path]:
 
 
 ENV_FILE = ROOT / ".env"
+NEWLINE = "\n"
 
 
 def load_env_file(path: Path | None = None) -> list[str]:
@@ -115,6 +116,24 @@ contain_environment()
 # Loaded after containment so a token in .env reaches every stage, while the
 # redirected cache locations above can never be overridden from a file.
 load_env_file()
+
+
+def set_env_value(key: str, value: str, path: Path | None = None) -> None:
+    """Store one setting in the project's .env, replacing any existing line.
+
+    Written here rather than to a user-level config so a chosen narrator stays
+    inside this directory like everything else.
+    """
+    target = path or ENV_FILE
+    lines: list[str] = []
+    if target.is_file():
+        lines = [
+            line for line in target.read_text(encoding="utf-8").splitlines()
+            if not line.strip().startswith(f"{key}=")
+        ]
+    lines.append(f"{key}={value}")
+    target.write_text(NEWLINE.join(lines) + NEWLINE, encoding="utf-8")
+    os.environ[key] = value
 
 
 def is_contained(path: str | os.PathLike[str]) -> bool:
@@ -232,7 +251,18 @@ class Settings:
     # rate, where above 1.0 is slower.
     # A male narrator by default. Piper's ryan is male, lessac is female. The
     # name must be one of the keys in models.PIPER_VOICES.
-    piper_voice: str = "en_US-ryan-medium"
+    #
+    # Read from RECAP_VOICE when set, which the voices command writes into the
+    # project's .env. That keeps a chosen narrator across runs without editing
+    # code, and keeps the choice inside this directory.
+    piper_voice: str = field(
+        default_factory=lambda: os.environ.get("RECAP_VOICE", "kokoro:am_liam")
+    )
+    # Kokoro's own rate, not derived from Piper's. Larger is faster here, the
+    # opposite of length_scale, and its baseline pace differs, so converting
+    # between them gave 96 words per minute where 150 to 170 reads well.
+    # Measured on am_michael: 0.9 gives 143 wpm, 1.0 gives 154, 1.3 gives 190.
+    kokoro_speed: float = 1.0
     narrate_gap_s: float = 0.35
     # Above 1.0 is slower, and the response is not linear in words per minute.
     # Measured on the Lessac medium voice: 1.0 gives 205 wpm, 1.6 gives 170, and
