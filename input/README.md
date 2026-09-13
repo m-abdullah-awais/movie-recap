@@ -10,7 +10,7 @@ With exactly one movie in here, no path is needed anywhere:
 
 ```powershell
 .\Run.bat
-.\.venv\Scripts\python.exe analyze.py all
+.\.venv\Scripts\python.exe scripts\analyze.py all
 ```
 
 If you keep several movies in here, the tool will list them and ask you to name

@@ -6,7 +6,12 @@
 # redirected below before any work happens.
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+
+# This script lives in scripts\, so the project root is one level up. uv finds
+# pyproject.toml by searching upward from the working directory, so move there
+# before doing anything, and the script then works from wherever it is called.
+$root = Split-Path -Parent $PSScriptRoot
+Set-Location $root
 
 # Redirect every cache and install location into the project.
 $env:UV_PYTHON_INSTALL_DIR  = Join-Path $root '.python'
@@ -45,10 +50,12 @@ if ($LASTEXITCODE -ne 0) { throw 'uv sync failed' }
 
 Write-Host ''
 Write-Host 'Verifying containment ...' -ForegroundColor Cyan
-& (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'analyze.py') doctor
+& (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $PSScriptRoot 'analyze.py') doctor
 if ($LASTEXITCODE -ne 0) { throw 'doctor reported a problem' }
 
 Write-Host ''
 Write-Host 'Setup complete.' -ForegroundColor Green
 Write-Host 'Run the pipeline with:'
-Write-Host '  .\.venv\Scripts\python.exe analyze.py all "path\to\movie.mkv"'
+Write-Host '  .\Run.bat'
+Write-Host 'or, for one stage at a time:'
+Write-Host '  .\.venv\Scripts\python.exe scripts\analyze.py all "path\to\movie.mkv"'

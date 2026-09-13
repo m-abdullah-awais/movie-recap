@@ -17,7 +17,7 @@ set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 cd /d "%ROOT%"
 
-rem Project-scoped locations, matching setup.ps1. Nothing is ever installed or
+rem Project-scoped locations, matching scripts\setup.ps1. Nothing is ever installed or
 rem cached outside this folder.
 set "UV_PYTHON_INSTALL_DIR=%ROOT%\.python"
 set "UV_PROJECT_ENVIRONMENT=%ROOT%\.venv"
@@ -99,7 +99,7 @@ echo --------------------------------------------------------------
 echo.
 
 set "STARTED=%TIME%"
-"%PY%" analyze.py all "!MOVIE!"
+"%PY%" "%ROOT%\scripts\analyze.py" all "!MOVIE!"
 set "CODE=%ERRORLEVEL%"
 
 echo.
@@ -140,7 +140,7 @@ echo  Running setup now. It installs Python 3.11 and the dependencies
 echo  inside this folder and downloads about 80 MB, which can take a
 echo  while on a slow connection.
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\setup.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\setup.ps1"
 if errorlevel 1 goto setup_failed
 echo.
 echo  Setup finished. Start this script again.

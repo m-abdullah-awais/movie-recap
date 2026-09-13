@@ -6,9 +6,9 @@ rem ==========================================================
 rem  Deletes reclaimable files, one category at a time.
 rem
 rem  Usage:
-rem    cleanup.bat        pick from a menu
-rem    cleanup.bat 1      run one option directly
-rem    cleanup.bat 1 -y   run it without confirming
+rem    Cleanup.bat        pick from a menu
+rem    Cleanup.bat 1      run one option directly
+rem    Cleanup.bat 1 -y   run it without confirming
 rem
 rem  Options are ordered by what it costs to get the data back.
 rem  Nothing here ever touches the input folder or the git history.
@@ -248,7 +248,7 @@ echo.
 call :confirm "Delete downloaded models anyway"
 if errorlevel 1 goto after
 if exist ".models" rd /s /q ".models" >nul 2>&1
-echo   Done. Run: analyze.py fetch-models  to try getting them back.
+echo   Done. Run: scripts\analyze.py fetch-models  to try getting them back.
 goto after
 
 rem ==========================================================
@@ -258,15 +258,15 @@ rem ==========================================================
 call :header "The whole Python toolchain"
 echo  About 500 MB: the virtual environment and the bundled Python.
 echo.
-echo  Nothing in this project will run afterwards until setup.ps1 has
-echo  been run again, which needs to download 80 MB. That took 53
+echo  Nothing in this project will run afterwards until scripts\setup.ps1
+echo  has been run again, which needs to download 80 MB. That took 53
 echo  minutes on this connection.
 echo.
 call :confirm "Delete the virtual environment and Python"
 if errorlevel 1 goto after
 if exist ".venv" rd /s /q ".venv" >nul 2>&1
 if exist ".python" rd /s /q ".python" >nul 2>&1
-echo   Done. Run setup.ps1 before using the tool again.
+echo   Done. Run scripts\setup.ps1 before using the tool again.
 goto after
 
 rem ==========================================================

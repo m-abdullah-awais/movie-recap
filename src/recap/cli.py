@@ -40,6 +40,20 @@ ALL_STAGES = (
 )
 
 
+def entry_point() -> str:
+    """How the user invoked this tool, for the hints printed alongside errors.
+
+    Taken from the command line rather than hardcoded, so moving or renaming the
+    entry script cannot leave the printed advice pointing at a path that no
+    longer exists. Falls back to the bare filename when the script sits outside
+    the working directory, since a relative path would be meaningless there.
+    """
+    try:
+        return str(Path(sys.argv[0]).resolve().relative_to(Path.cwd()))
+    except (ValueError, OSError):
+        return Path(sys.argv[0]).name or "analyze.py"
+
+
 # Shared option definitions, declared once so every command stays consistent.
 MovieArg = typer.Argument(
     None,
@@ -112,7 +126,7 @@ def _resolve_movie(movie: Path | None) -> Path:
         fg=typer.colors.RED, err=True,
     )
     for item in found:
-        typer.secho(f'  analyze.py all "input/{item.name}"', err=True)
+        typer.secho(f'  {entry_point()} all "input/{item.name}"', err=True)
     raise typer.Exit(2)
 
 
@@ -757,9 +771,10 @@ def voices(
 
     if not sample:
         print()
-        print("Hear them:   analyze.py voices --sample        (male voices)")
-        print("             analyze.py voices --sample --all  (every voice)")
-        print("Choose one:  analyze.py voices --use kokoro:am_michael")
+        run = entry_point()
+        print(f"Hear them:   {run} voices --sample        (male voices)")
+        print(f"             {run} voices --sample --all  (every voice)")
+        print(f"Choose one:  {run} voices --use kokoro:am_michael")
         return
 
     target = config.OUTPUT_DIR / "voice-samples"
@@ -811,7 +826,7 @@ def voices(
 
     print()
     print(f"Listen in {target}")
-    print("Then pick one with:  analyze.py voices --use kokoro:am_michael")
+    print(f"Then pick one with:  {entry_point()} voices --use kokoro:am_michael")
 
 
 @app.command("fetch-models")

@@ -100,7 +100,7 @@ def _transcribe(wav: Path, runtime_s: float, settings: Settings, quiet: bool) ->
     except ImportError as exc:
         raise RuntimeError(
             "faster-whisper is not installed, so films without subtitles cannot be read. "
-            "Run setup.ps1 to install it into the project venv."
+            "Run scripts\\setup.ps1 to install it into the project venv."
         ) from exc
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)

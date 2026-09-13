@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Entry point for the analysis stages of the Local Movie Recap Generator.
 
-Run ``python analyze.py --help`` for the available commands.
+Run ``python scripts/analyze.py --help`` for the available commands.
 
 ``recap.config`` is imported before anything else on purpose. It redirects every
 cache and install location into the project directory, and ``HF_HOME`` in
@@ -23,7 +23,8 @@ try:
 except (AttributeError, OSError):
     pass
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+# The package lives in src/ one level up, since this script sits in scripts/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from recap import config  # noqa: E402, F401  (imported first for containment)
 from recap.cli import main  # noqa: E402

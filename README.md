@@ -86,7 +86,7 @@ Everything is installed inside the project directory. Nothing is installed
 globally or to the user profile.
 
 ```powershell
-.\setup.ps1
+.\scripts\setup.ps1
 ```
 
 The script redirects every tool cache into the project, fetches CPython 3.11 into
@@ -124,13 +124,13 @@ The runner is a convenience. Every command it issues can be run directly.
 
 ```powershell
 # Check the environment and confirm nothing leaks outside the project
-.\.venv\Scripts\python.exe analyze.py doctor
+.\.venv\Scripts\python.exe scripts\analyze.py doctor
 
 # Inspect a file without doing any work
-.\.venv\Scripts\python.exe analyze.py info "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py info "D:\films\movie.mkv"
 
 # Run stages 1 to 3 and print per-stage timings
-.\.venv\Scripts\python.exe analyze.py all "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py all "D:\films\movie.mkv"
 ```
 
 Any container ffmpeg can read is accepted, including `.mp4`, `.mkv`, `.avi`, and
@@ -141,15 +141,15 @@ Any container ffmpeg can read is accepted, including `.mp4`, `.mkv`, `.avi`, and
 Each stage runs on its own for debugging.
 
 ```powershell
-.\.venv\Scripts\python.exe analyze.py ingest   "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py proxy    "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py scenemap "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py story    "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py script   "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py index    "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py narrate  "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py select   "D:\films\movie.mkv"
-.\.venv\Scripts\python.exe analyze.py render   "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py ingest   "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py proxy    "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py scenemap "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py story    "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py script   "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py index    "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py narrate  "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py select   "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py render   "D:\films\movie.mkv"
 ```
 
 ### Useful flags
@@ -169,8 +169,21 @@ Each stage runs on its own for debugging.
 ### Cache management
 
 ```powershell
-.\.venv\Scripts\python.exe analyze.py cache-list
-.\.venv\Scripts\python.exe analyze.py cache-clear "D:\films\movie.mkv"
+.\.venv\Scripts\python.exe scripts\analyze.py cache-list
+.\.venv\Scripts\python.exe scripts\analyze.py cache-clear "D:\films\movie.mkv"
+```
+
+### Reclaiming disk space
+
+`Cleanup.bat` deletes reclaimable files one category at a time, with the options
+ordered by what it costs to get each one back, from seconds to a fresh install.
+It confirms before every deletion, and it never touches the `input` folder or
+the git history.
+
+```powershell
+.\Cleanup.bat        pick from a menu
+.\Cleanup.bat 1      run one option directly
+.\Cleanup.bat 1 -y   run it without confirming
 ```
 
 ## How it works
@@ -243,10 +256,10 @@ sampling a dozen narrators costs nothing once its model is present, while each
 Piper voice is a separate download.
 
 ```powershell
-.\.venv\Scripts\python.exe analyze.py voices
-.\.venv\Scripts\python.exe analyze.py voices --sample
-.\.venv\Scripts\python.exe analyze.py voices --sample --all
-.\.venv\Scripts\python.exe analyze.py voices --use kokoro:am_liam
+.\.venv\Scripts\python.exe scripts\analyze.py voices
+.\.venv\Scripts\python.exe scripts\analyze.py voices --sample
+.\.venv\Scripts\python.exe scripts\analyze.py voices --sample --all
+.\.venv\Scripts\python.exe scripts\analyze.py voices --use kokoro:am_liam
 ```
 
 Samples all read the same line, which is the only fair way to compare them, and
@@ -426,28 +439,41 @@ Written to `cache/<source_id>/`.
 
 ## Project layout
 
+Only what you actually run sits in the root. Everything else is filed away.
+
 ```
 Run.bat                 pick a film, then run everything
-analyze.py              entry point
-setup.ps1               project-scoped bootstrap
+Cleanup.bat             delete reclaimable files, one category at a time
+README.md               this document
 pyproject.toml          dependencies, pinned to Python 3.11
+uv.lock                 the resolved dependency versions
+.env.example            template for the project-local .env
+scripts/
+  analyze.py            command line entry point
+  setup.ps1             project-scoped bootstrap
 src/recap/
   cli.py                Typer command line interface
   config.py             paths, tunables, environment containment
   cache.py              content hash cache layer
+  claude.py             headless Claude Code calls
+  clip.py               CLIP image and text encoders
+  models.py             model download and lookup
   ffmpeg.py             ffmpeg and ffprobe wrappers
   probe.py              stream selection and encoder probing
   srt.py                subtitle parsing and normalisation
   timing.py             timing report
-  stages/               ingest, proxy, scenemap
+  stages/               the nine pipeline stages, one file each
+input/                  put films here
+output/                 finished recaps, named by film and timestamp
+cache/                  per-film working data, safe to delete
 ```
 
 ## Troubleshooting
 
 **`doctor` reports the interpreter is not inside the project.** You are running
-the system Python. Use `.\.venv\Scripts\python.exe analyze.py` instead.
+the system Python. Use `.\.venv\Scripts\python.exe scripts\analyze.py` instead.
 
-**Setup fails with a network timeout.** Re-run `setup.ps1`. Completed downloads
+**Setup fails with a network timeout.** Re-run `scripts\setup.ps1`. Completed downloads
 are cached in `.uv-cache` and are not fetched again.
 
 **ffmpeg or ffprobe not found.** Put them on `PATH`, or set the `FFMPEG` and
