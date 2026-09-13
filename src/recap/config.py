@@ -318,7 +318,21 @@ class Settings:
     # minutes away, which reads as footage unrelated to the narration. Three
     # minutes is wide enough to survive an anchor that Claude placed wrongly,
     # and tight enough to keep the recap in the scene being described.
-    max_shot_distance_s: float = 180.0
+    max_shot_distance_s: float = 90.0
+
+    # One unbroken stretch of film per narration line, playing through the
+    # natural cuts, rather than several short clips stitched from different
+    # places. Stitching was the source of two visible faults: clips within a
+    # line ran out of order, only 10 of 86 lines were in ascending film time,
+    # and the later clips existed to pad out the remaining duration, their
+    # relevance falling from 0.785 to 0.690. A continuous run has no ordering to
+    # get wrong and nothing to pad.
+    continuous_runs: bool = True
+    max_run_s: float = 20.0
+
+    # Below this rescaled similarity, CLIP has not found anything convincing and
+    # its opinion should not outrank simply staying near the narrated moment.
+    similarity_floor: float = 0.15
 
     # Stage 9, render.
     #

@@ -22,12 +22,12 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "script"
-VERSION = 1
+VERSION = 2  # bumped: lines anchor to a cited beat, not an invented time
 
 SCRIPT_FILE = "script.json"
 CALL_DIR = "script_calls"
 
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2  # the prompt now asks for a beat id, so cached calls are stale
 
 PARAM_NAMES = (
     "script_target_words", "script_words_per_minute",
@@ -61,7 +61,7 @@ BEATS TO COVER, in order:
 Return JSON with exactly this shape:
 {{
   "segments": [
-    {{"story_time": int, "narration": "string", "visual_query": "string",
+    {{"beat_id": int, "narration": "string", "visual_query": "string",
       "characters": ["name"]}}
   ]
 }}
@@ -75,8 +75,9 @@ Rules for narration:
 - Do not invent events that are not in the beats.
 
 Rules for the other fields:
-- story_time is the second in the film the segment is describing. It must not go
-  backwards from one segment to the next, and must stay between {start_s} and {end_s}.
+- beat_id is the number of the beat this segment is narrating, taken from the
+  list above. Use the beats in order. Several consecutive segments may share one
+  beat when it needs more than one sentence, but never go backwards.
 - visual_query describes what should be ON SCREEN, in plain visual words, so that
   a shot can be matched to it. Describe the picture, not the plot. Name people
   only by what they look like or are doing. A good example is "a teenage boy
@@ -170,8 +171,18 @@ def _format_cast(cast: list[dict]) -> str:
 
 
 def _format_beats(beats: list[dict]) -> str:
+    """Beats as a numbered list, deliberately without timestamps.
+
+    Segments cite a beat number and the code looks up that beat's real time.
+    Asking for a timestamp instead produced anchors that merely looked
+    plausible: measured on a 94 minute film, only 22 percent of lines landed
+    within 5 seconds of the beat they were describing, the median was 31 seconds
+    out and the worst 95. With lines about 55 seconds apart, that routinely
+    pointed a line at its neighbour's scene. Showing no timestamps also removes
+    the temptation to invent one.
+    """
     return "\n".join(
-        f"- [{int(_num(b.get('start_s')))}s] {b.get('summary')}" for b in beats
+        f"- beat {int(_num(b.get('i')))}: {b.get('summary')}" for b in beats
     ) or "- no beats recorded for this stretch"
 
 
@@ -214,6 +225,7 @@ def run(
         segments: list[dict] = []
         failures: list[str] = []
         cost = 0.0
+        unresolved = 0
         previous_tail = ""
 
         for act in acts:
@@ -222,6 +234,7 @@ def run(
             if not act_beats:
                 continue
 
+            act_first = len(segments)
             share = (act["end_s"] - act["start_s"]) / span_total
             target = max(150, int(settings.script_target_words * share))
 
@@ -265,12 +278,25 @@ def run(
                 continue
 
             written = 0
+            # Beats for this act, by the id the model was shown.
+            by_id = {int(_num(b.get("i"), -1)): b for b in act_beats}
+            fallback_order = list(act_beats)
             for raw in reply.data.get("segments") or []:
                 narration = clean_narration(raw.get("narration"))
                 query = clean_narration(raw.get("visual_query"))
                 if not narration or not query:
                     continue
-                story_time = _num(raw.get("story_time"), act["start_s"])
+                # The anchor comes from the cited beat, not from the model.
+                beat_id = raw.get("beat_id")
+                beat = by_id.get(int(_num(beat_id, -1))) if beat_id is not None else None
+                if beat is None:
+                    # An unusable id means the prompt drifted. Fall back to the
+                    # next beat in order and count it, so a regression shows up
+                    # in the stats instead of silently degrading the anchors.
+                    beat = fallback_order[min(len(segments) - act_first,
+                                              len(fallback_order) - 1)]
+                    unresolved += 1
+                story_time = _num(beat.get("start_s"), act["start_s"])
                 story_time = min(max(story_time, act["start_s"]), act["end_s"])
                 # Narration must move forward through the film. A segment that
                 # goes backwards would show footage the recap has left behind.
@@ -283,6 +309,7 @@ def run(
                     "story_time": round(story_time, 2),
                     "narration": narration,
                     "visual_query": query,
+                    "beat_id": int(_num(beat.get("i"), -1)),
                     "characters": [str(c) for c in (raw.get("characters") or [])],
                     "spoiler_ceiling": spoiler_ceiling(
                         story_time, twists, runtime_s, settings.spoiler_lookahead_s
@@ -324,6 +351,7 @@ def run(
                 "estimated_minutes": round(est_seconds / 60.0, 2),
                 "act_count": len(acts),
                 "act_failures": failures,
+                "unresolved_beat_ids": unresolved,
                 "mean_words_per_segment": round(total_words / len(segments), 1),
                 "cost_usd": round(cost, 4),
                 "degraded": "act_failures" if failures else None,

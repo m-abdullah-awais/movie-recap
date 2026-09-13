@@ -20,7 +20,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 6  # bumped: bounded search radius around the narrated moment
+VERSION = 8  # bumped: consecutive lines on one beat play the scene straight through
 
 EDL_FILE = "edl.json"
 
@@ -28,6 +28,7 @@ PARAM_NAMES = (
     "clip_weight", "proximity_weight", "band_weight",
     "reuse_penalty", "dark_penalty", "min_clip_s", "max_clip_s",
     "proximity_sigma_s", "dark_luma", "max_shot_uses", "max_shot_distance_s",
+    "continuous_runs", "max_run_s", "similarity_floor",
 )
 
 
@@ -54,13 +55,18 @@ def band_score(duration: float, low: float, high: float) -> float:
     return max(0.0, high / duration)
 
 
-def proximity_score(shot_start: float, story_time: float, sigma_s: float) -> float:
+def proximity_score(shot_middle: float, story_time: float, sigma_s: float) -> float:
     """Closeness of a shot to the moment being described.
 
+    Measured to the middle of the shot rather than its first frame. A shot
+    beginning exactly on the anchor scored a perfect 1.0 while its content was
+    the following few seconds, which biased selection forward: footage ran a mean
+    11.5 seconds ahead of the moment being narrated.
+
     A gaussian rather than a hard window, so a good match slightly further away
-    can still win over a poor match nearby.
+    can still win over a poor match nearby. The hard bound is applied separately.
     """
-    delta = shot_start - story_time
+    delta = shot_middle - story_time
     return float(np.exp(-(delta * delta) / (2.0 * max(1.0, sigma_s) ** 2)))
 
 
@@ -82,6 +88,98 @@ def quantise(duration: float, fps: float | None) -> tuple[float, float]:
     frames = max(1, int(round(duration * fps)))
     exact = frames / fps
     return exact, (frames + 0.5) / fps
+
+
+def build_runs(
+    *,
+    need: float,
+    score: "np.ndarray",
+    uses: "np.ndarray",
+    starts: "np.ndarray",
+    durations: "np.ndarray",
+    ceiling: float,
+    content_start: float,
+    content_end: float,
+    similarity: "np.ndarray | None",
+    shots: list[dict],
+    settings: Settings,
+    source_fps: float | None,
+    resume_at: float | None = None,
+) -> list[dict]:
+    """One unbroken stretch of film for a narration line.
+
+    Playing continuously through the film's own cuts is how a recap is normally
+    cut by hand, and it removes two faults of stitching short clips together.
+    There is no ordering to get wrong, because a run is already in film order.
+    And nothing is filler, because the run is not padding out a remainder with
+    progressively worse matches.
+
+    A run starts on the chosen shot's first frame, so it begins on a cut rather
+    than mid-shot. It is then slid backwards if it would cross the line's spoiler
+    ceiling or the end of the film's content, and only ever shortened if there is
+    genuinely nowhere to put it.
+
+    ``resume_at`` continues from where the previous line's footage ended. Two
+    thirds of lines narrate a beat that the line before also narrated, and
+    scoring them independently sent the second one elsewhere, because the reuse
+    penalty pushed it off the footage the first had just used. Continuing instead
+    plays the scene straight through across both lines, which is what the
+    narration is describing.
+
+    Longer lines than ``max_run_s`` get a second run from a different part of the
+    film rather than one very long stretch, which would drift out of the scene.
+    """
+    clips: list[dict] = []
+    remaining = need
+    working = score.copy()
+    first = True
+
+    for _ in range(6):
+        if remaining <= 0.05:
+            break
+        adjusted = working - settings.reuse_penalty * uses
+        best = int(np.argmax(adjusted))
+        if adjusted[best] <= -1e5:
+            break
+
+        want = min(remaining, settings.max_run_s)
+
+        if first and resume_at is not None and content_start <= resume_at < min(ceiling, content_end):
+            # Carry straight on from the previous line rather than cutting away.
+            begin = resume_at
+            best = int(np.argmin(np.abs(starts - resume_at)))
+        else:
+            begin = float(starts[best])
+        first = False
+
+        # Slide back rather than forward, so the run never shows something the
+        # narration has not reached.
+        limit = min(ceiling, content_end)
+        if begin + want > limit:
+            begin = limit - want
+        begin = max(begin, content_start)
+        if begin + want > content_end:
+            want = max(0.0, content_end - begin)
+        if want <= 0.05:
+            working[best] = -1e6
+            continue
+
+        exact, request = quantise(want, source_fps)
+        clips.append({
+            "shot_i": shots[best].get("i", best),
+            "src_start": round(begin, 4),
+            "src_end": round(begin + request, 4),
+            "duration": round(exact, 4),
+            "score": round(float(adjusted[best]), 4),
+            "similarity": (round(float(similarity[best]), 4)
+                           if similarity is not None else None),
+            "continuous": True,
+        })
+        remaining -= exact
+        # Do not pick the same neighbourhood again for the remainder.
+        working[best] = -1e6
+
+    return clips
 
 
 def run(
@@ -160,6 +258,7 @@ def run(
         starts = np.array([_num(s.get("start")) for s in shots], dtype=np.float32)
         ends = np.array([_num(s.get("end")) for s in shots], dtype=np.float32)
         durations = np.maximum(0.0, ends - starts)
+        middles = starts + durations / 2.0
         lumas = np.array(
             [_num(s.get("luma"), 128.0) for s in shots], dtype=np.float32
         )
@@ -171,9 +270,17 @@ def run(
         )
         dark = (lumas < settings.dark_luma).astype(np.float32)
 
+        content_start = _num(index.get("content_start_s"), 0.0)
+        content_end = _num(index.get("content_end_s"), runtime_s) or runtime_s
+
         uses = np.zeros(len(shots), dtype=np.int32)
         timeline: list[dict] = []
         unfilled = 0
+        weak_matches = 0
+        # Where the previous line's footage ended, so a line continuing the same
+        # beat picks up from there instead of cutting to somewhere else.
+        last_story_time: float | None = None
+        last_end: float | None = None
 
         gap_s = _num(narration.get("gap_s"))
         for position, line in enumerate(lines):
@@ -188,8 +295,8 @@ def run(
             ceiling = _num(line.get("spoiler_ceiling"), story_time)
 
             proximity = np.array(
-                [proximity_score(float(s), story_time, settings.proximity_sigma_s)
-                 for s in starts],
+                [proximity_score(float(m), story_time, settings.proximity_sigma_s)
+                 for m in middles],
                 dtype=np.float32,
             )
 
@@ -228,14 +335,56 @@ def run(
             # narration. Widened only if nothing inside the radius qualifies.
             radius = settings.max_shot_distance_s
             for _ in range(4):
-                near = np.abs(starts - story_time) <= radius
+                near = np.abs(middles - story_time) <= radius
                 if np.any(np.where(near, score, -1e6) > -1e5):
                     break
                 radius *= 2.0
-            score = np.where(np.abs(starts - story_time) <= radius, score, -1e6)
+            score = np.where(np.abs(middles - story_time) <= radius, score, -1e6)
+
+            # When nothing in range looks convincing, CLIP has not recognised
+            # the scene and its opinion should not drag footage away from the
+            # moment being described. Fall back to staying close.
+            if use_clip and float(np.max(np.where(score > -1e5, similarity, 0.0))) \
+                    < settings.similarity_floor:
+                score = np.where(score > -1e5,
+                                 settings.proximity_weight * proximity
+                                 + settings.band_weight * bands
+                                 - settings.dark_penalty * dark,
+                                 -1e6)
+                weak_matches += 1
 
             clips: list[dict] = []
-            remaining = need
+
+            if settings.continuous_runs:
+                # Only continue when this line narrates the same beat as the
+                # last, otherwise a new beat should cut to its own scene.
+                resume = (last_end if last_story_time is not None
+                          and abs(story_time - last_story_time) < 0.01 else None)
+                clips = build_runs(
+                    need=need,
+                    score=score,
+                    uses=uses,
+                    starts=starts,
+                    durations=durations,
+                    ceiling=ceiling,
+                    content_start=content_start,
+                    content_end=content_end,
+                    similarity=similarity if use_clip else None,
+                    shots=shots,
+                    settings=settings,
+                    source_fps=source_fps,
+                    resume_at=resume,
+                )
+                last_story_time = story_time
+                last_end = clips[-1]["src_end"] if clips else None
+                for clip in clips:
+                    # Every shot the run passes through counts as used, so a
+                    # later line is nudged away from repeating the same stretch.
+                    touched = np.where((starts < clip["src_end"])
+                                       & (starts + durations > clip["src_start"]))[0]
+                    uses[touched] += 1
+
+            remaining = need if not clips else 0.0
             guard = 0
             while remaining > 0.3 and guard < 64:
                 guard += 1
@@ -335,6 +484,8 @@ def run(
                     sum(c["duration"] for t in timeline for c in t["clips"]) / clip_count, 2
                 ) if clip_count else 0.0,
                 "used_clip": use_clip,
+                "continuous_runs": settings.continuous_runs,
+                "weak_matches": weak_matches,
                 "degraded": None if use_clip else "no_clip_similarity",
             },
         }
