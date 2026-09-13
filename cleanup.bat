@@ -64,6 +64,7 @@ echo    9  The whole Python toolchain       full setup again, very slow
 echo.
 echo    A  Everything in groups 1 to 3      the safe sweep
 echo    B  Whole cache folder for all films keeps models and toolchain
+echo    C  Everything from finished recaps    cache, videos and temp
 echo.
 echo    0  Exit without deleting anything
 echo.
@@ -84,6 +85,7 @@ if /i "%PICK%"=="8" goto opt_models
 if /i "%PICK%"=="9" goto opt_toolchain
 if /i "%PICK%"=="A" goto opt_safe
 if /i "%PICK%"=="B" goto opt_cache
+if /i "%PICK%"=="C" goto opt_finished
 echo.
 echo   Not an option: %PICK%
 echo.
@@ -290,6 +292,48 @@ for /d %%D in ("cache\*") do (
     if exist "%%~D\narrate.meta.json" del /f /q "%%~D\narrate.meta.json" >nul 2>&1
 )
 echo   Done.
+goto after
+
+rem ==========================================================
+rem  B  whole cache
+rem ==========================================================
+:opt_finished
+call :header "Everything from finished recaps"
+echo  Clears the work for films that have been through the pipeline:
+echo.
+echo    cache            every analysis artifact, for every film
+echo    output           the rendered videos and their subtitle files
+echo    output samples   the generated voice samples
+echo    temp             scratch files, keeping the two sample clips
+echo.
+echo  Kept: the input films, the downloaded models, the Python
+echo  toolchain, and your chosen narrator in .env.
+echo.
+echo  THIS DELETES YOUR FINISHED RECAPS. They are the point of the
+echo  whole exercise, so move anything worth keeping out of the
+echo  output folder first.
+echo.
+echo  Rebuilding from nothing takes about 25 minutes for a 90 minute
+echo  film and costs roughly 2 dollars in Claude calls, because the
+echo  cached story and script go too.
+echo.
+call :confirm "Delete all finished recaps and their cache"
+if errorlevel 1 goto after
+call :confirm "This removes the videos in output. Really delete them"
+if errorlevel 1 goto after
+
+if exist "cache" rd /s /q "cache" >nul 2>&1
+
+rem Flattened rather than nested inside a parenthesised if block. cmd.exe
+rem mis-parses a for loop placed inside one, which fails the whole option.
+for %%F in ("output\*.mp4" "output\*.srt" "output\*.mkv") do if exist "%%~F" del /f /q "%%~F" >nul 2>&1
+if exist "output\voice-samples" rd /s /q "output\voice-samples" >nul 2>&1
+
+for %%F in ("temp\*.txt" "temp\*.json" "temp\*.log" "temp\*.srt" "temp\*.wav") do if exist "%%~F" del /f /q "%%~F" >nul 2>&1
+for /d %%D in ("temp\qsvtest" "temp\lean" "temp\testcache*" "temp\pace" "temp\kpace") do if exist "%%~D" rd /s /q "%%~D" >nul 2>&1
+for /f "delims=" %%D in ('dir /s /b /ad __pycache__ 2^>nul ^| findstr /v /i "\.venv"') do rd /s /q "%%D" >nul 2>&1
+
+echo   Done. Input films, models and the toolchain were left alone.
 goto after
 
 rem ==========================================================
