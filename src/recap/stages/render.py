@@ -30,7 +30,7 @@ from ..cache import Cache, StageOutcome, atomic_path, read_json, run_stage, writ
 from ..config import OUTPUT_DIR, Settings
 
 STAGE = "render"
-VERSION = 8  # bumped: the film's own audio is muted, narration only
+VERSION = 9  # bumped: audio muted to narration only, and level normalised
 
 FINAL_FILE = "final.mp4"
 # Written here first, then moved into place. See the note in run(). The .mp4
@@ -46,7 +46,7 @@ SILENCE_WAV_FMT = "gap_{rate}hz.wav"
 
 PARAM_NAMES = (
     "render_height", "render_crf", "qsv_quality", "allow_qsv", "copy_video",
-    "mute_source_audio", "duck_threshold", "duck_ratio",
+    "mute_source_audio", "loudness_lufs", "duck_threshold", "duck_ratio",
     "narration_gain", "source_gain", "publish_subtitles",
 )
 
@@ -305,12 +305,17 @@ def audio_filter(settings: Settings, ordinal: int) -> str:
     the other keys the compressor. Without that split the sidechain input would
     be consumed and the mix would lose the narration entirely.
     """
+    # Even out the level to a broadcast style target. Applied to whichever path
+    # is taken, because narration alone is quiet and a mix is uneven.
+    loudness = (f"loudnorm=I={settings.loudness_lufs}:TP=-1.5:LRA=11,"
+                if settings.loudness_lufs else "")
+
     if settings.mute_source_audio:
         # The film's audio stream is simply never referenced, so nothing from it
         # reaches the output. Resampled here because the narration is mono at the
         # voice's own rate and the output is 48 kHz stereo.
         return (
-            f"[1:a]volume={settings.narration_gain},"
+            f"[1:a]volume={settings.narration_gain},{loudness}"
             f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[mix]"
         )
 
@@ -322,7 +327,8 @@ def audio_filter(settings: Settings, ordinal: int) -> str:
         f"[src][narkey]sidechaincompress="
         f"threshold={settings.duck_threshold}:ratio={settings.duck_ratio}"
         f":attack=5:release=300[ducked];"
-        f"[ducked][narmix]amix=inputs=2:duration=longest:normalize=0[mix]"
+        f"[ducked][narmix]amix=inputs=2:duration=longest:normalize=0,"
+        f"{loudness}aformat=sample_fmts=fltp:sample_rates=48000[mix]"
     )
 
 

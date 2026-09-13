@@ -377,6 +377,13 @@ class Settings:
     # narrator instead of supporting him. Set this false to bring the film's
     # audio back as a ducked bed, controlled by the settings below.
     mute_source_audio: bool = True
+    # Loudness normalisation to a broadcast style target, in LUFS. Narration on
+    # its own measured a mean of -25 dB with peaks at -3.2, so there was no
+    # headroom left to simply turn it up: raising the gain would clip before it
+    # reached a comfortable level. Normalising to -16 LUFS is the usual target
+    # for spoken word on video platforms and reaches it by evening out the
+    # dynamics rather than by amplifying. Set to 0 to leave the level alone.
+    loudness_lufs: float = -16.0
     duck_threshold: float = 0.03
     duck_ratio: float = 8.0
     narration_gain: float = 1.0
