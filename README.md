@@ -27,8 +27,8 @@ needed.
 | 1 | `ingest` | Extract dialogue from embedded subtitles, a sidecar file, or speech recognition | Built |
 | 2 | `proxy` | One ffmpeg read of the film producing scene data and a 16 kHz mono wav | Built |
 | 3 | `scenemap` | Coarse shot boundaries across the whole film | Built |
-| 4 | `story` | Claude reads the dialogue and outputs cast, acts, and plot beats | Built |
-| 5 | `script` | Claude turns the story into narration segments with visual queries | Built |
+| 4 | `story` | The AI reads the dialogue and outputs cast, acts, and plot beats | Built |
+| 5 | `script` | The AI turns the story into narration segments with visual queries | Built |
 | 6 | `index` | Keyframes and CLIP embeddings, restricted to relevant regions | Built |
 | 7 | `narrate` | Kokoro text to speech, cached by text hash | Built |
 | 8 | `select` | Score and pick shots for each narration segment | Built |
@@ -60,6 +60,20 @@ On an Intel i7-8650U, 4 cores at 2.1 GHz, with Intel UHD 620 graphics, against a
 | `render` | 7:12 | |
 | Total | 24:00 | $2.04 |
 
+Stages 4 and 5 are the only ones that differ by AI engine. Both were measured on
+the same film, from the same transcript.
+
+| | Claude Code | Antigravity |
+| --- | --- | --- |
+| `story` | 3:44, $1.58, 35 beats | 3:36, 240k tokens, 31 beats |
+| `script` | 2:33, $0.46, 77 segments | 4:25, 75k tokens, 83 segments |
+| Both | 6:17 | 8:01 |
+
+Antigravity takes about a minute and three quarters longer over the two stages
+and reports no cost, since it bills against the subscription rather than per
+call. The output is comparable: the same three act structure, a full beat list,
+and a script of 2,264 words against 2,408.
+
 Reading the film is effectively the entire cost, and it is unavoidable. Scale by
 your film's runtime: a 2 hour film lands near 9 minutes. Software decoding is
 roughly 25 percent slower. Writing a 480p proxy as well adds about 6 minutes,
@@ -73,7 +87,9 @@ every 720 frames on this film, far too coarse for shot detection.
 ## Requirements
 
 - Windows with PowerShell
-- A Claude subscription, for the two stages that call `claude -p`
+- A subscription to one of the two supported coding agents, for the two
+  stages that read the plot and write the narration: Google Antigravity or
+  Anthropic's Claude Code
 - Up to 2 GB of disk for the toolchain and models, less when the machine
   already has some of it, plus roughly 200 MB per film analysed
 
@@ -97,12 +113,16 @@ use the copy this computer already has, otherwise put a private copy in
 | `uv` | any version on `PATH` | downloaded to `.tools\uv` |
 | Python 3.11 | a 3.11 the machine already has | downloaded to `.python` |
 | `ffmpeg` and `ffprobe` | on `PATH` | downloaded to `.tools\ffmpeg` |
-| Node | on `PATH` | current LTS downloaded to `.tools\node` |
-| Claude Code | `claude` on `PATH` | installed into `.tools\claude` with `npm --prefix` |
+| Node | on `PATH` | current LTS downloaded to `.tools\node`, only needed for Claude Code |
+| The AI engine | `agy` or `claude` on `PATH` | the one you pick is installed into `.tools` |
+
+Setup asks which AI engine should write the recap and installs only that one.
+Antigravity is a single 40 MB executable and needs nothing else. Claude Code is
+a 70 MB npm package that unpacks to 240 MB and needs Node 22, so choosing
+Antigravity skips both downloads.
 
 Measured, worst case, on a machine with none of them: 17 MB for uv, 190 MB for
-ffmpeg, 30 MB for Node, and 70 MB for Claude Code, which unpacks to 240 MB
-because it ships a native binary.
+ffmpeg, 30 MB for Node, and 40 or 70 MB for the engine.
 
 Python 3.11 specifically, because `ctranslate2` publishes no wheels for newer
 versions. The dependencies go into `.venv`, and the Kokoro narrator and the CLIP
@@ -121,8 +141,35 @@ them to time out on a slow link. Re-running resumes from what is already there
 rather than starting over, and setup finishes with a `doctor` check that fails
 loudly if anything landed outside the project.
 
-Claude Code needs to be signed in once, with your own subscription. If setup
+Either engine needs to be signed in once, with your own account. If setup
 installed it, it prints the path to run for that.
+
+## Choosing the AI engine
+
+Two stages use AI: stage 4 reads the plot out of the dialogue, and stage 5 writes
+the narration. Nothing else in the pipeline does, and neither stage ever sees the
+picture. Both run a coding agent's command line tool on your own subscription, so
+there is no API key anywhere in this project.
+
+| | Antigravity | Claude Code |
+| --- | --- | --- |
+| Command | `agy` | `claude` |
+| From | Google | Anthropic |
+| Install | one 40 MB executable | 70 MB npm package, 240 MB on disk, needs Node 22 |
+| Sign in | Google account, once | Claude subscription, once |
+| Reports cost | no, tokens only | yes, in dollars |
+
+Setup asks once and records the answer in `.tools\engine.txt`. To try the other
+one without re-running setup, pass `--engine`:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze.py story --engine antigravity
+.\.venv\Scripts\python.exe scripts\analyze.py all   --engine claude
+```
+
+The engine is part of the cache key for every AI call, so the two keep their
+answers side by side. Switching re-runs stages 4 and 5 once, and switching back to
+one you have used before costs nothing.
 
 ## Moving it to another computer
 
@@ -224,19 +271,21 @@ the git history.
 
 ### Story understanding
 
-Stage 4 sends one Claude call per ten minute window of dialogue, then a single
+Stage 4 sends one call per ten minute window of dialogue, then a single
 synthesis call merges the windows into a whole-film structure. Every call is
 cached individually by the hash of its prompt, so a failed run never repays for
 the windows that already succeeded, and a re-run costs nothing.
 
-Calls use `--system-prompt`, which replaces the default system prompt outright
-and keeps this project's own memory files out of an analysis call. Flags stay
-identical between calls so each one after the first reuses the same prompt cache
-prefix. That is the difference between five cents and twenty-five cents a call.
+On Claude Code the calls use `--system-prompt`, which replaces the default
+system prompt outright and keeps this project's own memory files out of an
+analysis call. Flags stay identical between calls so each one after the first
+reuses the same prompt cache prefix. That is the difference between five cents
+and twenty-five cents a call. The Antigravity CLI has no equivalent flag, so
+there the same text is prepended to the prompt instead.
 
 ### Writing the script
 
-Stage 5 writes one Claude call per act, in order rather than in parallel, because
+Stage 5 writes one call per act, in order rather than in parallel, because
 each act's narration has to follow on from the last without repeating it. The
 word budget is shared out by how much of the film each act covers.
 
@@ -260,7 +309,7 @@ An earlier version indexed only narrow windows around each narration anchor.
 That was a speed optimisation and it quietly capped retrieval quality: it left
 roughly three candidates per line, so the timestamp effectively chose the footage
 and CLIP only broke ties between near-duplicates. It was also brittle, because
-those anchors come from Claude reading subtitle timings, and one off by half a
+those anchors come from the AI reading subtitle timings, and one off by half a
 minute put every candidate in the wrong scene with no way to recover.
 
 Set `index_whole_film` to false to restore the narrowed behaviour, which keeps
@@ -448,9 +497,9 @@ Written to `cache/<source_id>/`.
 | `scdet.raw.txt` | proxy | Candidate scene changes with their scores |
 | `scenes.json` | scenemap | Shot list with statistics |
 | `story.json` | story | Cast, acts, beats, setups and payoffs, twists |
-| `story_calls/` | story | One cached response per Claude call |
+| `story_calls/` | story | One cached response per AI call, keyed by engine |
 | `script.json` | script | Narration segments with visual queries and spoiler ceilings |
-| `script_calls/` | script | One cached response per Claude call |
+| `script_calls/` | script | One cached response per AI call, keyed by engine |
 | `shots.json` | index | Narrowed regions, shots, keyframes, brightness |
 | `keyframes/` | index | One 224 by 224 frame per shot, named by timestamp |
 | `clip_index.npy` | index | Shot embeddings, when CLIP is available |
@@ -482,7 +531,7 @@ src/recap/
   cli.py                Typer command line interface
   config.py             paths, tunables, environment containment
   cache.py              content hash cache layer
-  claude.py             headless Claude Code calls
+  ai.py                 headless calls to whichever AI engine is in use
   clip.py               CLIP image and text encoders
   models.py             model download and lookup
   ffmpeg.py             ffmpeg and ffprobe wrappers
@@ -511,9 +560,10 @@ finished is kept, so it resumes rather than starting over.
 instead, set the `FFMPEG` and `FFPROBE` environment variables to their full
 paths.
 
-**Stages 4 and 5 fail with claude not found.** Claude Code is missing, or it is
-installed but not signed in. Run `Setup.bat` to install it into `.tools\claude`,
-then run that copy once and sign in with your subscription.
+**Stages 4 and 5 fail saying the engine was not found.** The coding agent is
+missing, or it is installed but not signed in. Run `Setup.bat`, pick an engine,
+then run the copy it installed once and sign in. `doctor` lists both engines and
+says which one is in use.
 
 **Scene detection finds far too many or too few cuts.** Retune with
 `--threshold`. Detection during the proxy pass runs at a permissive floor and
