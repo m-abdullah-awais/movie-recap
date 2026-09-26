@@ -349,8 +349,10 @@ def run(
         sequences: list[dict] = []
         failures: list[str] = []
         cost = 0.0
+        tokens = 0
         for chunk, reply in zip(chunks, replies):
             cost += reply.cost_usd
+            tokens += reply.tokens
             if reply.ok:
                 sequences.append({"index": chunk.index, "start_s": chunk.start_s,
                                   "end_s": chunk.end_s, **reply.data})
@@ -392,6 +394,7 @@ def run(
             timeout=settings.ai_timeout_s,
         )
         cost += synthesis.cost_usd
+        tokens += synthesis.tokens
 
         degraded = None
         if synthesis.ok:
@@ -434,6 +437,7 @@ def run(
                 "beat_count": len(beats),
                 "twist_count": len(_normalise_twists(story.get("twists") or [], runtime_s)),
                 "cost_usd": round(cost, 4),
+                "tokens": tokens,
                 "degraded": degraded,
             },
         }
@@ -449,6 +453,10 @@ def run(
         ]
         if meta.get("cost_usd"):
             bits.append(f"${meta['cost_usd']:.2f}")
+        elif meta.get("tokens"):
+            # The engine reported tokens rather than money, which is the only
+            # consumption figure there is to show.
+            bits.append(f"{meta['tokens'] / 1000:.0f}k tokens")
         failed = len(meta.get("segment_failures") or [])
         if failed:
             bits.append(f"{failed} segment(s) failed")

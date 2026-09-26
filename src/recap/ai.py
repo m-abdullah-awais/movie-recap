@@ -6,9 +6,11 @@ and the Antigravity CLI, and setup installs whichever one was chosen. No API
 keys, no local language model, and deliberately no Ollama.
 
 Only three things differ between the two, so only those live in an engine class:
-how the process is invoked, whether the prompt goes on stdin or in an argument,
-and what the reply envelope is called. Everything else, the caching, the retries
-and the JSON salvage, is shared.
+what the process is called, how the prompt and the system prompt are handed to
+it, and what the reply envelope calls its fields. Everything else, the caching,
+the retries and the JSON salvage, is shared. Both take the prompt on stdin,
+which is what keeps a ten minute window of transcript clear of the Windows
+command line cap of about 32,000 characters.
 
 Every call is cached on disk by the hash of its engine, system prompt, user
 prompt, and prompt version. That matters because a stage makes one call per ten
@@ -45,13 +47,6 @@ class EngineFailed(RuntimeError):
     """A call failed, or never produced parseable JSON."""
 
 
-# Windows builds one command line string from the whole argument list and caps
-# it a little under 32,768 characters. Antigravity takes its prompt as an
-# argument, so a long transcript window has to be refused with a name rather
-# than handed over and silently cut in half by the operating system.
-MAX_COMMAND_LINE = 30000
-
-
 class Engine:
     """How one command line tool is driven.
 
@@ -62,9 +57,28 @@ class Engine:
     name = ""
     program = ""
     description = ""
+    # Other command names the same tool ships under.
+    aliases: tuple[str, ...] = ()
+    # Where setup puts its own copy, looked at before PATH. A machine can have
+    # an unrelated program by the same name, and the copy installed for this
+    # project is the one that was tested against this code.
+    local_dir: Path | None = None
+
+    def locate(self) -> str | None:
+        names = (self.program,) + self.aliases
+        if self.local_dir is not None:
+            for name in names:
+                candidate = self.local_dir / f"{name}.exe"
+                if candidate.is_file():
+                    return str(candidate)
+        for name in names:
+            found = shutil.which(name)
+            if found:
+                return found
+        return None
 
     def binary(self) -> str:
-        found = shutil.which(self.program)
+        found = self.locate()
         if not found:
             raise EngineUnavailable(
                 f"the '{self.program}' command was not found. All AI reasoning in "
@@ -74,7 +88,7 @@ class Engine:
         return found
 
     def available(self) -> bool:
-        return shutil.which(self.program) is not None
+        return self.locate() is not None
 
     def command(
         self, system: str, prompt: str, model: str | None
@@ -82,9 +96,29 @@ class Engine:
         """The argv to run, and the text to write to its stdin, if any."""
         raise NotImplementedError
 
-    def read(self, envelope: dict) -> tuple[str, float, float]:
-        """The reply text, the cost in dollars, and the seconds it took."""
+    def read(self, envelope: dict) -> tuple[str, float, float, int]:
+        """The reply text, the cost in dollars, the seconds, and the tokens."""
         raise NotImplementedError
+
+    @staticmethod
+    def tokens(envelope: dict) -> int:
+        """Total tokens, when the engine reports them.
+
+        A reported total is used as it stands. Adding up every key that looks
+        like a token count would double it, because Antigravity reports its own
+        ``total_tokens`` alongside the parts. This is reporting only: nothing
+        depends on it being exact.
+        """
+        usage = envelope.get("usage")
+        if not isinstance(usage, dict):
+            return 0
+        stated = usage.get("total_tokens")
+        if isinstance(stated, (int, float)):
+            return int(stated)
+        return sum(
+            int(value) for key, value in usage.items()
+            if "token" in key and isinstance(value, (int, float))
+        )
 
 
 class ClaudeEngine(Engine):
@@ -116,11 +150,12 @@ class ClaudeEngine(Engine):
             args += ["--model", model]
         return args, prompt
 
-    def read(self, envelope: dict) -> tuple[str, float, float]:
+    def read(self, envelope: dict) -> tuple[str, float, float, int]:
         return (
             envelope.get("result") or "",
             float(envelope.get("total_cost_usd") or 0.0),
             float(envelope.get("duration_ms") or 0.0) / 1000.0,
+            self.tokens(envelope),
         )
 
 
@@ -128,42 +163,43 @@ class AntigravityEngine(Engine):
     name = "antigravity"
     program = "agy"
     description = "the headless Antigravity CLI"
+    # The Windows release zip ships the executable as antigravity.exe, while
+    # the official installer puts it on PATH as agy. Both are the same program.
+    aliases = ("antigravity",)
+    local_dir = config.TOOLS_DIR / "agy"
 
     def command(
         self, system: str, prompt: str, model: str | None
     ) -> tuple[list[str], str | None]:
         """
-        This CLI has no separate system prompt, and takes its prompt as an
-        argument rather than on stdin, so the two are joined and passed as one.
-        The length is checked here because the operating system would otherwise
-        truncate it without saying so.
+        This CLI has no separate system prompt, so the system text is prepended
+        to the prompt and the two go in as one.
+
+        It is sent on stdin rather than through ``-p``, which the CLI accepts
+        and which is the only way that does not run into the Windows command
+        line cap of about 32,000 characters. Piped input also makes the run
+        non-interactive, which is what ``-p`` would otherwise be for.
         """
         joined = f"{system}\n\n{prompt}" if system else prompt
-        if len(joined) > MAX_COMMAND_LINE:
-            raise EngineFailed(
-                f"the prompt is {len(joined)} characters, and the Antigravity CLI "
-                f"takes it as a command line argument, which Windows caps near "
-                f"{MAX_COMMAND_LINE}. Lower story_chunk_s, or use --engine claude, "
-                "which sends the prompt on stdin instead."
-            )
-        args = [self.binary(), "-p", joined, "--output-format", "json"]
+        args = [self.binary(), "--output-format", "json"]
         if model:
             args += ["--model", model]
-        return args, None
+        return args, joined
 
-    def read(self, envelope: dict) -> tuple[str, float, float]:
+    def read(self, envelope: dict) -> tuple[str, float, float, int]:
         status = str(envelope.get("status") or "").upper()
         if status and status != "SUCCESS":
             raise EngineFailed(
                 f"the Antigravity CLI reported {status}: "
                 f"{envelope.get('error') or 'no reason given'}"
             )
-        # This CLI reports tokens rather than money, so there is no cost to
-        # report and the stage prints a blank instead of a wrong number.
+        # This CLI reports tokens rather than money, so cost is zero, which the
+        # stages print as nothing at all rather than as a wrong number.
         return (
             envelope.get("response") or "",
             0.0,
             float(envelope.get("duration_seconds") or 0.0),
+            self.tokens(envelope),
         )
 
 
@@ -208,9 +244,13 @@ def installed_engine() -> str:
 
     A one word record rather than a configuration file: it is written by setup,
     read by nothing else, and deleted along with the tools it describes.
+
+    Read as utf-8-sig because Windows PowerShell writes a byte order mark even
+    when asked for utf8, and a leading mark is not whitespace, so stripping
+    would leave a name that matches nothing.
     """
     try:
-        return config.ENGINE_FILE.read_text(encoding="utf-8").strip().lower()
+        return config.ENGINE_FILE.read_text(encoding="utf-8-sig").strip().lower()
     except OSError:
         return ""
 
@@ -253,6 +293,7 @@ class Reply:
     cost_usd: float
     seconds: float
     cached: bool
+    tokens: int = 0
     error: str = ""
 
     @property
@@ -317,7 +358,8 @@ def ask(
     if target.is_file():
         try:
             stored = read_json(target)
-            return Reply(call.tag, stored["data"], 0.0, 0.0, cached=True)
+            return Reply(call.tag, stored["data"], 0.0, 0.0, cached=True,
+                         tokens=int(stored.get("tokens") or 0))
         except (json.JSONDecodeError, KeyError, OSError):
             target.unlink(missing_ok=True)  # unreadable cache entry, just redo it
 
@@ -326,13 +368,13 @@ def ask(
     for attempt in range(retries + 1):
         try:
             envelope = _invoke(engine, call.system, prompt, model, timeout)
-            text, cost, seconds = engine.read(envelope)
+            text, cost, seconds, tokens = engine.read(envelope)
             data = extract_json(text)
             cache_dir.mkdir(parents=True, exist_ok=True)
             write_json(target, {"key": key, "tag": call.tag, "data": data,
-                                "engine": engine.name,
-                                "cost_usd": cost, "seconds": seconds})
-            return Reply(call.tag, data, cost, seconds, cached=False)
+                                "engine": engine.name, "cost_usd": cost,
+                                "seconds": seconds, "tokens": tokens})
+            return Reply(call.tag, data, cost, seconds, cached=False, tokens=tokens)
         except (EngineFailed, subprocess.TimeoutExpired) as exc:
             last_error = str(exc)
             if attempt < retries:

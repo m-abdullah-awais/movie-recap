@@ -873,7 +873,7 @@ def doctor():
 
     print("\nAI engines, for stages 4 and 5")
     for engine in ai.ENGINES.values():
-        found = shutil.which(engine.program)
+        found = engine.locate()
         if found:
             where = "project" if config.is_contained(found) else "system"
             print(f"  {engine.name:<24} {found}  [{where}]")

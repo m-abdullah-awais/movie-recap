@@ -229,6 +229,7 @@ def run(
         segments: list[dict] = []
         failures: list[str] = []
         cost = 0.0
+        tokens = 0
         unresolved = 0
         previous_tail = ""
 
@@ -275,6 +276,7 @@ def run(
                 timeout=settings.ai_timeout_s,
             )
             cost += reply.cost_usd
+            tokens += reply.tokens
 
             if not reply.ok:
                 failures.append(f"act {act['act']}: {reply.error[:140]}")
@@ -359,6 +361,7 @@ def run(
                 "unresolved_beat_ids": unresolved,
                 "mean_words_per_segment": round(total_words / len(segments), 1),
                 "cost_usd": round(cost, 4),
+                "tokens": tokens,
                 "degraded": "act_failures" if failures else None,
             },
         }
@@ -373,6 +376,8 @@ def run(
         ]
         if meta.get("cost_usd"):
             bits.append(f"${meta['cost_usd']:.2f}")
+        elif meta.get("tokens"):
+            bits.append(f"{meta['tokens'] / 1000:.0f}k tokens")
         if meta.get("degraded"):
             bits.append(f"DEGRADED {meta['degraded']}")
         return ", ".join(bits)
