@@ -58,7 +58,7 @@ echo    6  The uv download cache            80 MB re-download, slow link
 echo.
 echo  Think before choosing:
 echo.
-echo    7  Claude responses                 costs about 2 dollars to redo
+echo    7  Cached AI responses              costs about 2 dollars to redo
 echo    8  Downloaded models                CLIP cannot be re-downloaded here
 echo    9  The whole toolchain              full setup again, very slow
 echo.
@@ -208,10 +208,10 @@ echo   Done.
 goto after
 
 rem ==========================================================
-rem  7  claude responses
+rem  7  cached AI responses
 rem ==========================================================
 :opt_calls
-call :header "Claude responses"
+call :header "Cached AI responses"
 echo  Only a few hundred kilobytes, so this reclaims almost nothing.
 echo.
 echo  It is on the list because the opposite matters: these are the
@@ -220,7 +220,7 @@ echo  them again, roughly 2 dollars and 6 minutes per film.
 echo.
 echo  Delete these only if you want the story rewritten from scratch.
 echo.
-call :confirm "Delete cached Claude responses"
+call :confirm "Delete cached AI responses"
 if errorlevel 1 goto after
 for /d %%D in ("cache\*") do (
     if exist "%%~D\story_calls" rd /s /q "%%~D\story_calls" >nul 2>&1
@@ -260,7 +260,7 @@ rem ==========================================================
 call :header "The whole toolchain"
 echo  About 500 MB: the virtual environment, the bundled Python, and
 echo  anything in .tools, which is where setup puts the programs this
-echo  computer did not already have, such as ffmpeg and Claude Code.
+echo  computer did not already have, such as ffmpeg and the AI engine.
 echo.
 echo  Nothing in this project will run afterwards until Setup.bat has
 echo  been run again. That downloads up to 550 MB, which took the best
@@ -319,7 +319,7 @@ echo  whole exercise, so move anything worth keeping out of the
 echo  output folder first.
 echo.
 echo  Rebuilding from nothing takes about 25 minutes for a 90 minute
-echo  film and costs roughly 2 dollars in Claude calls, because the
+echo  film and costs roughly 2 dollars in AI calls, because the
 echo  cached story and script go too.
 echo.
 call :confirm "Delete all finished recaps and their cache"
@@ -348,7 +348,7 @@ rem ==========================================================
 call :header "The whole cache folder"
 echo  Every analysis artifact for every film, currently about 600 MB.
 echo.
-echo  This includes the cached Claude responses, so the story and the
+echo  This includes the cached AI responses, so the story and the
 echo  script would be paid for again, roughly 2 dollars per film. A
 echo  full re-run from scratch takes about 24 minutes for a 90 minute
 echo  film.

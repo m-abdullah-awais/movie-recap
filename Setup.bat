@@ -6,7 +6,9 @@ rem ==========================================================
 rem  One click install. Everything lands inside this folder.
 rem
 rem  Usage:
-rem    Setup.bat      install whatever is missing, then verify
+rem    Setup.bat              ask which AI engine, then install
+rem    Setup.bat antigravity  install without asking
+rem    Setup.bat claude       install without asking
 rem
 rem  Anything this machine already has is used as it is. Anything
 rem  missing is installed into this folder only. Nothing is ever
@@ -29,8 +31,10 @@ echo     %ROOT%
 echo.
 echo  What it does:
 echo.
-echo    - uses any of uv, Python 3.11, ffmpeg, Node or Claude Code
-echo      that this computer already has
+echo    - asks which AI engine writes the recap, Antigravity or
+echo      Claude Code, and installs only the one you pick
+echo    - uses any of uv, Python 3.11, ffmpeg or Node that this
+echo      computer already has
 echo    - installs the ones it does not have into this folder
 echo    - downloads the narrator voice and the shot matching models
 echo    - checks that nothing at all escaped this folder
@@ -43,7 +47,7 @@ echo  Nothing is installed globally on this computer.
 echo.
 echo --------------------------------------------------------------
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\setup.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\setup.ps1" -Engine "%~1"
 set "CODE=%ERRORLEVEL%"
 
 echo.

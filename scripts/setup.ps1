@@ -8,6 +8,14 @@
 #
 # The rule for every external program is the same: use the machine's copy when
 # it has one, otherwise put a private copy in .tools and use that.
+#
+# One choice is asked for: which AI engine runs stages 4 and 5. Only that one is
+# installed. Pass it as an argument to skip the question.
+
+param(
+    [ValidateSet('antigravity', 'claude', '')]
+    [string]$Engine = ''
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # the built-in progress bar is slower than the download
@@ -139,16 +147,80 @@ if ($haveFfmpeg) {
 }
 
 # --------------------------------------------------------------------------
-# Claude Code, which every AI stage calls
+# The AI engine, which stages 4 and 5 call
 # --------------------------------------------------------------------------
-Write-Step 'Claude Code'
-Write-Info 'Stages 4 and 5 run "claude -p" on your own subscription. No API key is used.'
+Write-Step 'AI engine'
+Write-Info 'Stages 4 and 5 read the plot and write the narration. They run a coding'
+Write-Info 'agent on your own subscription, so no API key is used. Pick one.'
+
+$engineFile = Join-Path $tools 'engine.txt'
+$choice = $Engine
+if (-not $choice -and (Test-Path $engineFile)) {
+    $choice = (Get-Content $engineFile -Raw).Trim().ToLower()
+    if ($choice) { Write-Info "keeping the engine this folder was set up with: $choice" }
+}
+if (-not $choice) {
+    Write-Host ''
+    Write-Host '     1  Antigravity   Google, one 40 MB download, nothing else needed'
+    Write-Host '     2  Claude Code   Anthropic, needs Node and 240 MB on disk'
+    Write-Host ''
+    $reply = Read-Host '   Which engine? [1]'
+    $choice = if ($reply.Trim() -eq '2') { 'claude' } else { 'antigravity' }
+    Write-Host ''
+}
+Write-Ok "using $choice"
+
+# The engine name is recorded so the pipeline knows which one this folder was
+# set up with. That matters only on a machine that already had both installed,
+# where nothing else would say which was chosen. It is deleted with .tools.
+New-Item -ItemType Directory -Force $tools | Out-Null
+Set-Content -Path $engineFile -Value $choice -Encoding utf8 -NoNewline
+
+if ($choice -eq 'antigravity') {
+    # The release zip ships the binary as antigravity.exe, while the official
+    # installer puts it on PATH as agy. Either name counts as installed.
+    $agyDir = Join-Path $tools 'agy'
+    $localAgy = Get-ChildItem -Path $agyDir -Filter '*.exe' -ErrorAction SilentlyContinue |
+                Where-Object { $_.BaseName -in @('agy', 'antigravity') } |
+                Select-Object -First 1 -ExpandProperty FullName
+    $agy = Get-Command agy -ErrorAction SilentlyContinue
+    if ($agy) {
+        Write-Ok ("using the Antigravity CLI already on this machine: " + $agy.Source)
+        $script:usedSystem += 'Antigravity CLI'
+    } else {
+        if (-not $localAgy) {
+            # The official installer writes to the user profile and then runs
+            # the binary's own install step, so the release archive is used
+            # instead and unpacked here like every other tool.
+            $arch = if ((Get-Arch) -eq 'arm64') { 'arm64' } else { 'x64' }
+            Get-Archive "https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_windows_$arch.zip" `
+                        $agyDir 'the Antigravity CLI, 40 MB to fetch, 200 MB on disk'
+            $localAgy = Get-ChildItem -Path $agyDir -Filter '*.exe' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.BaseName -in @('agy', 'antigravity') } |
+                        Select-Object -First 1 -ExpandProperty FullName
+        }
+        if (-not $localAgy) { throw 'the Antigravity CLI could not be installed into .tools' }
+        $version = (& $localAgy --version 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host '   the Antigravity CLI installed but will not start.' -ForegroundColor Yellow
+        } else {
+            Write-Ok "installed into the project: $localAgy"
+            Write-Info "reports itself as: $version"
+            $script:usedLocal += 'Antigravity CLI'
+        }
+    }
+    $env:PATH = (Join-Path $tools 'agy') + ";$env:PATH"
+}
+
 $claude = Get-Command claude -ErrorAction SilentlyContinue
 # The package ships its own executable. Everything prefers that over the .cmd
 # shim npm writes beside it, because a .cmd hands every argument back to
 # cmd.exe to re-parse, and the system prompt is passed as an argument.
 $localClaude = Join-Path $tools 'claude\node_modules\@anthropic-ai\claude-code\bin\claude.exe'
-if ($claude) {
+if ($choice -ne 'claude') {
+    # Not the chosen engine, so none of it is installed. Node is only ever
+    # needed to install Claude Code, which is why it is inside this branch.
+} elseif ($claude) {
     Write-Ok ("using the Claude Code already on this machine: " + $claude.Source)
     $script:usedSystem += 'Claude Code'
 } elseif (Test-Path $localClaude) {
@@ -245,12 +317,24 @@ Write-Host ''
 Write-Host ' Nothing was installed globally and your PATH was not changed.'
 Write-Host ' Deleting this folder removes every trace of the tool.'
 Write-Host ''
-if (-not (Get-Command claude -ErrorAction SilentlyContinue) -and (Test-Path $localClaude)) {
-    Write-Host ' One thing left to do. Claude Code needs you to sign in once:' -ForegroundColor Yellow
-    Write-Host "   $localClaude"
-    Write-Host ' Run it, sign in with your Claude subscription, then close it.'
-    Write-Host ' The sign in is stored by Claude Code under your user profile,'
-    Write-Host ' which is its own business and nothing to do with this project.'
+# Both engines sign in once, interactively, and keep the result under the user
+# profile. That is the agent's own business and holds nothing of this project,
+# but it does mean setup cannot do it unattended, so it is spelled out here.
+$signIn = ''
+if ($choice -eq 'antigravity' -and -not (Get-Command agy -ErrorAction SilentlyContinue)) {
+    $signIn = $localAgy
+    $account = 'your Google account'
+} elseif ($choice -eq 'claude' -and -not (Get-Command claude -ErrorAction SilentlyContinue) -and (Test-Path $localClaude)) {
+    $signIn = $localClaude
+    $account = 'your Claude subscription'
+}
+if ($signIn -and (Test-Path $signIn)) {
+    Write-Host ' If you have not used this engine before, it needs signing in once:' -ForegroundColor Yellow
+    Write-Host "   $signIn"
+    Write-Host " Run it, sign in with $account, then close it. Already signed in"
+    Write-Host ' elsewhere on this machine? Then there is nothing to do.'
+    Write-Host ' The sign in is kept by that tool under your user profile, which'
+    Write-Host ' is its own business and nothing to do with this project.'
     Write-Host ''
 }
 Write-Host ' Next: put a film in the input folder and double click Run.bat.'

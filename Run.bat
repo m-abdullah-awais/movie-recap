@@ -35,7 +35,7 @@ rem this code win. This affects this window only and is never persisted.
 rem Claude Code's own executable comes before the .cmd shim npm writes beside
 rem it, because a .cmd hands every argument back to cmd.exe to re-parse.
 set "CLAUDEBIN=%ROOT%\.tools\claude\node_modules\@anthropic-ai\claude-code\bin"
-set "PATH=%ROOT%\.tools\ffmpeg\bin;%ROOT%\.tools\node;%CLAUDEBIN%;%ROOT%\.tools\claude\node_modules\.bin;%PATH%"
+set "PATH=%ROOT%\.tools\ffmpeg\bin;%ROOT%\.tools\node;%ROOT%\.tools\agy;%CLAUDEBIN%;%ROOT%\.tools\claude\node_modules\.bin;%PATH%"
 
 set "PY=%ROOT%\.venv\Scripts\python.exe"
 set "CHOICE=%~1"
@@ -90,8 +90,8 @@ echo.
 echo    1 ingest     read the film's dialogue
 echo    2 proxy      read the film once, the longest stage
 echo    3 scenemap   find the shot boundaries
-echo    4 story      Claude works out the plot
-echo    5 script     Claude writes the narration
+echo    4 story      the AI works out the plot
+echo    5 script     the AI writes the narration
 echo    6 index      match shots to what the narration describes
 echo    7 narrate    speak every line
 echo    8 select     choose footage for each line
