@@ -779,23 +779,26 @@ def fetch_models(
         6, "--attempts", help="How many times to retry a rate limited host."
     ),
 ):
-    """Download the CLIP encoders into the project.
+    """Download the Kokoro voice model and the CLIP encoders into the project.
 
     Separate from the stages so that a rate limited host is waited out here,
     deliberately, rather than in the middle of a pipeline run.
     """
     print(f"models directory: {config.MODELS_DIR}")
 
-    print("\nKokoro voice model")
-    voice = models.kokoro_available()
-    if not voice:
-        typer.secho(
-            "  missing. Put kokoro-v1.0.onnx and voices-v1.0.bin in "
-            f"{config.MODELS_DIR / 'kokoro'}.",
-            fg=typer.colors.RED,
-        )
-    else:
+    print("\nKokoro voice model, about 340 MB")
+    if models.kokoro_available():
+        voice = True
         print("  ready: model and voices")
+    else:
+        voice = models.ensure_kokoro(attempts=attempts) is not None
+        if voice:
+            print("  ready: model and voices")
+        else:
+            typer.secho(
+                "  unavailable. Narration falls back to the Windows system voice.",
+                fg=typer.colors.YELLOW,
+            )
 
     print("\nCLIP encoders")
     assets = models.ensure_clip(attempts=attempts)

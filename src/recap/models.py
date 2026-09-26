@@ -103,6 +103,68 @@ def kokoro_available() -> bool:
     return assets.model.is_file() and assets.voices.is_file()
 
 
+# The model and its voice pack come from the kokoro-onnx release on GitHub. That
+# host needs no credentials and does not rate limit the way Hugging Face does,
+# which matters because this is the one asset the tool cannot narrate without.
+_KOKORO_RELEASE = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+)
+KOKORO_FILES = {
+    "kokoro-v1.0.onnx": _KOKORO_RELEASE + "kokoro-v1.0.onnx",
+    "voices-v1.0.bin": _KOKORO_RELEASE + "voices-v1.0.bin",
+}
+
+
+def ensure_kokoro(*, quiet: bool = False, attempts: int = 4) -> KokoroAssets | None:
+    """Fetch the Kokoro model, or return None so the caller can degrade.
+
+    About 340 MB in total, so progress is reported. Without it the narrator
+    falls back to the robotic Windows system voice, which still produces a
+    finished video.
+    """
+    if kokoro_available():
+        return kokoro_paths()
+
+    target_dir = MODELS_DIR / "kokoro"
+    try:
+        for name, url in KOKORO_FILES.items():
+            destination = target_dir / name
+            if destination.is_file() and destination.stat().st_size > 0:
+                continue
+            download(
+                url, destination, attempts=attempts, timeout=600.0,
+                on_progress=None if quiet else _percent(name),
+            )
+            if not quiet:
+                print()
+    except DownloadFailed as exc:
+        if not quiet:
+            print(f"  Kokoro model unavailable: {exc}")
+        return None
+    return kokoro_paths()
+
+
+def _percent(name: str) -> Callable[[int, int], None]:
+    """Progress printer for a large download.
+
+    Written with a carriage return so a 300 MB file occupies one line rather
+    than a thousand, and throttled to whole percents for the same reason.
+    """
+    state = {"shown": -1}
+
+    def report(done: int, total: int) -> None:
+        if total <= 0:
+            return
+        pct = int(done * 100 / total)
+        if pct == state["shown"]:
+            return
+        state["shown"] = pct
+        print(f"\r  fetching {name}  {pct:3d}%  {done / 1048576:6.1f} MB",
+              end="", flush=True)
+
+    return report
+
+
 class DownloadFailed(RuntimeError):
     pass
 
