@@ -38,6 +38,7 @@ _CLAUDE_PKG = TOOLS_DIR / "claude" / "node_modules" / "@anthropic-ai" / "claude-
 TOOL_BINS: tuple[Path, ...] = (
     TOOLS_DIR / "ffmpeg" / "bin",
     TOOLS_DIR / "node",
+    TOOLS_DIR / "agy",
     # Claude Code's own executable comes first, ahead of the .cmd shim npm
     # writes next to it. A .cmd means cmd.exe re-parses every argument, and the
     # system prompt is passed as one: a percent sign or an ampersand in it would
@@ -47,6 +48,13 @@ TOOL_BINS: tuple[Path, ...] = (
     TOOLS_DIR / "claude" / "node_modules" / ".bin",
     TOOLS_DIR / "uv",
 )
+
+# Which AI engine setup installed, one word, written by Setup.bat. This is an
+# install record rather than a setting: nobody edits it, and it is deleted along
+# with the tools it describes. It exists for the case where a machine has both
+# coding agents installed already, where nothing else would say which one was
+# chosen.
+ENGINE_FILE = TOOLS_DIR / "engine.txt"
 
 CACHE_ROOT = ROOT / "cache"
 # Finished videos are published here under a timestamped name, so a re-run
@@ -169,7 +177,8 @@ class Settings:
     tail_fraction: float = 0.06
     fallback_shot_s: float = 4.0
 
-    # Stage 4, story. All AI reasoning goes through headless Claude Code.
+    # Stage 4, story. All AI reasoning goes through a headless coding agent,
+    # either Claude Code or the Antigravity CLI, whichever setup installed.
     #
     # Ten minute windows keep each call's attention on a manageable stretch of
     # film while still giving enough context to describe a scene. A trailing
@@ -179,9 +188,12 @@ class Settings:
     # pushing the account's rate limit.
     story_chunk_s: int = 600
     story_overlap_s: int = 45
-    claude_model: str = ""  # empty means the session default
-    claude_concurrency: int = 3
-    claude_timeout_s: int = 300
+    # Empty means whatever the engine would choose for itself, which is the
+    # right default for both of them and keeps the flags identical between
+    # calls. A name here is passed straight through to --model.
+    ai_model: str = ""
+    ai_concurrency: int = 3
+    ai_timeout_s: int = 300
 
     # Stage 5, script.
     #

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from .. import claude
+from .. import ai
 from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
@@ -31,7 +31,7 @@ PROMPT_VERSION = 2  # the prompt now asks for a beat id, so cached calls are sta
 
 PARAM_NAMES = (
     "script_target_words", "script_words_per_minute",
-    "spoiler_lookahead_s", "claude_model",
+    "spoiler_lookahead_s", "ai_model",
 )
 
 SYSTEM = (
@@ -190,6 +190,7 @@ def run(
     cache: Cache,
     settings: Settings,
     *,
+    engine: ai.Engine | None = None,
     force: bool = False,
     quiet: bool = False,
 ) -> StageOutcome:
@@ -204,9 +205,12 @@ def run(
     if not beats:
         raise RuntimeError("the story has no beats, so there is nothing to narrate")
 
+    picked = engine or ai.select_engine()
+
     params = settings.params(*PARAM_NAMES)
     params["prompt_version"] = PROMPT_VERSION
     params["beat_count"] = len(beats)
+    params["ai_engine"] = picked.name
 
     def work() -> dict:
         call_dir = cache.dir / CALL_DIR
@@ -262,12 +266,13 @@ def run(
                 spoilers=spoilers,
             )
 
-            reply = claude.ask(
-                claude.Call(tag=f"act{act['act']:02d}", system=SYSTEM, prompt=prompt),
+            reply = ai.ask(
+                ai.Call(tag=f"act{act['act']:02d}", system=SYSTEM, prompt=prompt),
                 cache_dir=call_dir,
                 version=PROMPT_VERSION,
-                model=settings.claude_model or None,
-                timeout=settings.claude_timeout_s,
+                engine=picked,
+                model=settings.ai_model or None,
+                timeout=settings.ai_timeout_s,
             )
             cost += reply.cost_usd
 

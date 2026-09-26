@@ -16,7 +16,7 @@ from typing import Optional
 
 import typer
 
-from . import claude, config, ffmpeg, models, probe
+from . import ai, config, ffmpeg, models, probe
 from .cache import Cache, StageOutcome, read_json, source_id
 from .config import CACHE_ROOT, Settings
 from .stages import (
@@ -72,6 +72,20 @@ WithProxyOpt = typer.Option(
 CacheDirOpt = typer.Option(None, "--cache-dir", help="Override the cache root.")
 JsonOpt = typer.Option(False, "--json", help="Emit machine readable output.")
 QuietOpt = typer.Option(False, "--quiet", "-q", help="Suppress progress output.")
+EngineOpt = typer.Option(
+    None, "--engine",
+    help="AI engine for stages 4 and 5: claude or antigravity. "
+         "Defaults to whichever setup installed.",
+)
+
+
+def _engine(name: str | None) -> ai.Engine:
+    """The engine for this run, or a clean exit explaining what to do about it."""
+    try:
+        return ai.select_engine(name)
+    except ai.EngineUnavailable as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
 
 
 def _settings(
@@ -277,6 +291,7 @@ def run_all(
     threshold: Optional[float] = ThresholdOpt,
     no_qsv: bool = NoQsvOpt,
     with_proxy: bool = WithProxyOpt,
+    engine: Optional[str] = EngineOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     json: bool = JsonOpt,
     quiet: bool = QuietOpt,
@@ -284,6 +299,9 @@ def run_all(
     """Run the whole pipeline, stages 1 to 9, then print per stage timings."""
     force_stage = _validate_stages(force_stage)
     settings = _settings(proxy_height, threshold, no_qsv, with_proxy)
+    # Resolved before the film is touched, so a missing engine is reported in a
+    # second rather than after the seven minute read.
+    picked = _engine(engine)
     movie, cache, probe_data, duration = _open(movie, cache_dir)
     report = Report(movie, duration)
 
@@ -320,24 +338,24 @@ def run_all(
     if ingest_outcome.failed:
         steps.skip("story", "no dialogue was obtained")
     else:
-        steps.start("story", "Claude reads the plot")
+        steps.start("story", "the AI reads the plot")
         try:
             steps.done(story.run(
-                cache, settings,
+                cache, settings, engine=picked,
                 force=_forced("story", force, force_stage), quiet=quiet,
             ))
-        except (RuntimeError, claude.ClaudeUnavailable) as exc:
+        except (RuntimeError, ai.EngineUnavailable) as exc:
             steps.done(StageOutcome("story", "failed", 0.0, {}, "no story built", str(exc)))
 
     # Stage 5 narrates the story, so it only runs when there is one to narrate.
     if cache.path(story.STORY_FILE).is_file():
-        steps.start("script", "Claude writes the narration")
+        steps.start("script", "the AI writes the narration")
         try:
             steps.done(script.run(
-                cache, settings,
+                cache, settings, engine=picked,
                 force=_forced("script", force, force_stage), quiet=quiet,
             ))
-        except (RuntimeError, claude.ClaudeUnavailable) as exc:
+        except (RuntimeError, ai.EngineUnavailable) as exc:
             steps.done(
                 StageOutcome("script", "failed", 0.0, {}, "no script written", str(exc))
             )
@@ -495,14 +513,16 @@ def scenemap_stage(
 def story_stage(
     movie: Optional[Path] = MovieArg,
     force: bool = ForceOpt,
+    engine: Optional[str] = EngineOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     quiet: bool = QuietOpt,
 ):
-    """Stage 4 only. Read the dialogue through Claude and build the story."""
+    """Stage 4 only. Read the dialogue through the AI and build the story."""
     settings = Settings()
+    picked = _engine(engine)
     movie, cache, probe_data, duration = _open(movie, cache_dir)
     report = Report(movie, duration)
-    report.add(story.run(cache, settings, force=force, quiet=quiet))
+    report.add(story.run(cache, settings, engine=picked, force=force, quiet=quiet))
     print("\n" + report.render())
 
 
@@ -510,14 +530,16 @@ def story_stage(
 def script_stage(
     movie: Optional[Path] = MovieArg,
     force: bool = ForceOpt,
+    engine: Optional[str] = EngineOpt,
     cache_dir: Optional[Path] = CacheDirOpt,
     quiet: bool = QuietOpt,
 ):
     """Stage 5 only. Turn the story into a narration script."""
     settings = Settings()
+    picked = _engine(engine)
     movie, cache, probe_data, duration = _open(movie, cache_dir)
     report = Report(movie, duration)
-    report.add(script.run(cache, settings, force=force, quiet=quiet))
+    report.add(script.run(cache, settings, engine=picked, force=force, quiet=quiet))
     print("\n" + report.render())
 
 
@@ -849,13 +871,23 @@ def doctor():
             ok = False
             print(f"  {name:<24} MISSING, {exc}")
 
-    found = shutil.which("claude")
-    if found:
-        where = "project" if config.is_contained(found) else "system"
-        print(f"  {'claude':<24} {found}  [{where}]")
-    else:
-        print(f"  {'claude':<24} MISSING, stages 4 and 5 cannot run without it")
+    print("\nAI engines, for stages 4 and 5")
+    for engine in ai.ENGINES.values():
+        found = shutil.which(engine.program)
+        if found:
+            where = "project" if config.is_contained(found) else "system"
+            print(f"  {engine.name:<24} {found}  [{where}]")
+        else:
+            print(f"  {engine.name:<24} not installed")
+
+    recorded = ai.installed_engine()
+    try:
+        selected = ai.select_engine()
+        reason = "chosen at setup" if recorded else "the only one found"
+        print(f"  {'in use':<24} {selected.name}  [{reason}]")
+    except ai.EngineUnavailable as exc:
         ok = False
+        print(f"  {'in use':<24} NONE, {exc}")
 
     print("\nmodels")
     for name, present in (("kokoro", models.kokoro_available()),

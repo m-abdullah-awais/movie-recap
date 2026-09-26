@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .. import claude
+from .. import ai
 from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
@@ -30,7 +30,7 @@ CALL_DIR = "story_calls"
 # prompt change should do.
 PROMPT_VERSION = 1
 
-PARAM_NAMES = ("story_chunk_s", "story_overlap_s", "claude_model")
+PARAM_NAMES = ("story_chunk_s", "story_overlap_s", "ai_model")
 
 SEQUENCE_SYSTEM = (
     "You are a film story analyst. You read dialogue transcripts and return "
@@ -284,6 +284,7 @@ def run(
     settings: Settings,
     *,
     transcript_file: str = "transcript.json",
+    engine: ai.Engine | None = None,
     force: bool = False,
     quiet: bool = False,
 ) -> StageOutcome:
@@ -299,18 +300,23 @@ def run(
     if not cues:
         raise RuntimeError("the transcript has no dialogue cues to analyse")
 
+    # Resolved before the cache is consulted, because which engine wrote an
+    # answer is part of what makes it reusable.
+    picked = engine or ai.select_engine()
+
     params = settings.params(*PARAM_NAMES)
     params["prompt_version"] = PROMPT_VERSION
     params["cue_count"] = len(cues)
+    params["ai_engine"] = picked.name
 
     def work() -> dict:
         call_dir = cache.dir / CALL_DIR
         chunks = chunk_transcript(cues, runtime_s, settings)
         if not quiet:
-            print(f"  reading {len(chunks)} segments of dialogue through headless Claude")
+            print(f"  reading {len(chunks)} segments of dialogue through {picked.description}")
 
         calls = [
-            claude.Call(
+            ai.Call(
                 tag=f"seq{chunk.index:03d}",
                 system=SEQUENCE_SYSTEM,
                 prompt=SEQUENCE_TEMPLATE.format(
@@ -323,19 +329,20 @@ def run(
             for chunk in chunks
         ]
 
-        def progress(reply: claude.Reply, done: int, total: int) -> None:
+        def progress(reply: ai.Reply, done: int, total: int) -> None:
             if quiet:
                 return
             mark = "cached" if reply.cached else ("failed" if reply.error else "ok")
             print(f"    segment {done}/{total}  {mark}")
 
-        replies = claude.ask_many(
+        replies = ai.ask_many(
             calls,
             cache_dir=call_dir,
             version=PROMPT_VERSION,
-            model=settings.claude_model or None,
-            timeout=settings.claude_timeout_s,
-            concurrency=settings.claude_concurrency,
+            engine=picked,
+            model=settings.ai_model or None,
+            timeout=settings.ai_timeout_s,
+            concurrency=settings.ai_concurrency,
             on_done=progress,
         )
 
@@ -370,8 +377,8 @@ def run(
                 )
             )
 
-        synthesis = claude.ask(
-            claude.Call(
+        synthesis = ai.ask(
+            ai.Call(
                 tag="synthesis",
                 system=SYNTHESIS_SYSTEM,
                 prompt=SYNTHESIS_TEMPLATE.format(
@@ -380,8 +387,9 @@ def run(
             ),
             cache_dir=call_dir,
             version=PROMPT_VERSION,
-            model=settings.claude_model or None,
-            timeout=settings.claude_timeout_s,
+            engine=picked,
+            model=settings.ai_model or None,
+            timeout=settings.ai_timeout_s,
         )
         cost += synthesis.cost_usd
 
