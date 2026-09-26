@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import json as jsonlib
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -841,10 +842,26 @@ def doctor():
     print("\nexternal tools")
     for name, resolver in (("ffmpeg", ffmpeg.ffmpeg_bin), ("ffprobe", ffmpeg.ffprobe_bin)):
         try:
-            print(f"  {name:<24} {resolver()}")
+            found = resolver()
+            where = "project" if config.is_contained(found) else "system"
+            print(f"  {name:<24} {found}  [{where}]")
         except ffmpeg.MissingBinary as exc:
             ok = False
             print(f"  {name:<24} MISSING, {exc}")
+
+    found = shutil.which("claude")
+    if found:
+        where = "project" if config.is_contained(found) else "system"
+        print(f"  {'claude':<24} {found}  [{where}]")
+    else:
+        print(f"  {'claude':<24} MISSING, stages 4 and 5 cannot run without it")
+        ok = False
+
+    print("\nmodels")
+    for name, present in (("kokoro", models.kokoro_available()),
+                          ("clip", models.clip_available())):
+        note = "present" if present else "missing, run fetch-models"
+        print(f"  {name:<24} {note}")
 
     print("\nhardware acceleration")
     try:

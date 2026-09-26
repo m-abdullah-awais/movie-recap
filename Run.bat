@@ -25,8 +25,17 @@ set "UV_CACHE_DIR=%ROOT%\.uv-cache"
 set "PIP_CACHE_DIR=%ROOT%\.uv-cache\pip"
 set "XDG_CACHE_HOME=%ROOT%\.uv-cache"
 set "HF_HOME=%ROOT%\.models"
+set "npm_config_cache=%ROOT%\.uv-cache\npm"
 set "UV_HTTP_TIMEOUT=300"
 set "UV_CONCURRENT_DOWNLOADS=2"
+
+rem Programs setup installed into the project because this machine did not
+rem already have them. Put them first, so the copies that were tested against
+rem this code win. This affects this window only and is never persisted.
+rem Claude Code's own executable comes before the .cmd shim npm writes beside
+rem it, because a .cmd hands every argument back to cmd.exe to re-parse.
+set "CLAUDEBIN=%ROOT%\.tools\claude\node_modules\@anthropic-ai\claude-code\bin"
+set "PATH=%ROOT%\.tools\ffmpeg\bin;%ROOT%\.tools\node;%CLAUDEBIN%;%ROOT%\.tools\claude\node_modules\.bin;%PATH%"
 
 set "PY=%ROOT%\.venv\Scripts\python.exe"
 set "CHOICE=%~1"
@@ -127,8 +136,10 @@ rem ==========================================================
 rem  problems
 rem ==========================================================
 :no_ffmpeg
-echo  ffmpeg is not on PATH, and the tool cannot run without it.
-echo  Install it, or set the FFMPEG and FFPROBE variables to its path.
+echo  ffmpeg was not found, and the tool cannot run without it.
+echo.
+echo  Run Setup.bat. It installs a copy inside this folder, without
+echo  touching anything else on this computer.
 echo.
 pause
 goto eof
@@ -136,9 +147,9 @@ goto eof
 :no_venv
 echo  The project is not set up yet.
 echo.
-echo  Running setup now. It installs Python 3.11 and the dependencies
-echo  inside this folder and downloads about 80 MB, which can take a
-echo  while on a slow connection.
+echo  Running setup now. It uses whatever this computer already has
+echo  and installs the rest inside this folder. On a bare machine that
+echo  is about 750 MB, which takes a while on a slow connection.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\setup.ps1"
 if errorlevel 1 goto setup_failed

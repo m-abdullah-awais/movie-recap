@@ -24,7 +24,29 @@ CONTAINED_ENV: dict[str, Path] = {
     "PIP_CACHE_DIR": ROOT / ".uv-cache" / "pip",
     "XDG_CACHE_HOME": ROOT / ".uv-cache",
     "HF_HOME": ROOT / ".models",
+    # npm is only used by setup, to install the Claude Code CLI into the
+    # project, but its cache defaults to the user profile and is worth pinning
+    # for the same reason as the rest.
+    "npm_config_cache": ROOT / ".uv-cache" / "npm",
 }
+
+# External programs that Setup.bat installed into the project because the
+# machine did not already have them. Each entry is a directory holding
+# executables, listed in the order they should be searched.
+TOOLS_DIR = ROOT / ".tools"
+_CLAUDE_PKG = TOOLS_DIR / "claude" / "node_modules" / "@anthropic-ai" / "claude-code"
+TOOL_BINS: tuple[Path, ...] = (
+    TOOLS_DIR / "ffmpeg" / "bin",
+    TOOLS_DIR / "node",
+    # Claude Code's own executable comes first, ahead of the .cmd shim npm
+    # writes next to it. A .cmd means cmd.exe re-parses every argument, and the
+    # system prompt is passed as one: a percent sign or an ampersand in it would
+    # be expanded or split, which would be invisible here and would only show up
+    # on a machine that used the local install.
+    _CLAUDE_PKG / "bin",
+    TOOLS_DIR / "claude" / "node_modules" / ".bin",
+    TOOLS_DIR / "uv",
+)
 
 CACHE_ROOT = ROOT / "cache"
 # Finished videos are published here under a timestamped name, so a re-run
@@ -76,7 +98,27 @@ def contain_environment() -> None:
         os.environ[name] = str(target)
 
 
+def prepend_local_tools() -> list[Path]:
+    """Put the project's own copies of ffmpeg, node and claude first on PATH.
+
+    Setup installs an external program into ``.tools`` only when the machine
+    does not already have it, so in practice there is nothing to shadow. When
+    there is, the project's copy wins: it is the one that was tested against
+    this code, and it cannot disappear when the user tidies their PATH.
+
+    Returning the directories that were added lets ``doctor`` report them.
+    """
+    present = [path for path in TOOL_BINS if path.is_dir()]
+    if not present:
+        return []
+    prefix = os.pathsep.join(str(path) for path in present)
+    current = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{prefix}{os.pathsep}{current}" if current else prefix
+    return present
+
+
 contain_environment()
+prepend_local_tools()
 
 
 def is_contained(path: str | os.PathLike[str]) -> bool:

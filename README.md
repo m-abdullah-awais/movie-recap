@@ -73,32 +73,66 @@ every 720 frames on this film, far too coarse for shot detection.
 ## Requirements
 
 - Windows with PowerShell
-- `ffmpeg` and `ffprobe` on `PATH`, or `FFMPEG` and `FFPROBE` pointing at them
-- `uv` on `PATH`
-- Roughly 200 MB of disk for the toolchain, plus about 200 MB per film analysed
+- A Claude subscription, for the two stages that call `claude -p`
+- Up to 2 GB of disk for the toolchain and models, less when the machine
+  already has some of it, plus roughly 200 MB per film analysed
 
-Python 3.11 is required and is installed by the setup script. The system Python is
-not used, because `ctranslate2` publishes no wheels for Python 3.14.
+Nothing has to be installed first. `Setup.bat` uses whatever the machine
+already has and installs the rest inside the project folder.
 
 ## Installation
 
-Everything is installed inside the project directory. Nothing is installed
-globally or to the user profile.
+Double click `Setup.bat`, or run it from a terminal.
 
 ```powershell
-.\scripts\setup.ps1
+.\Setup.bat
 ```
 
-The script redirects every tool cache into the project, fetches CPython 3.11 into
-`.python`, creates `.venv`, installs the dependencies, and then verifies
-containment by running the `doctor` command.
+It works through five external things, and for each one the rule is the same:
+use the copy this computer already has, otherwise put a private copy in
+`.tools` and use that.
 
-The dependency download is around 80 MB. The script raises the HTTP timeout to
-300 seconds and limits itself to two parallel downloads, because the default 30
+| | Used if present | Otherwise |
+| --- | --- | --- |
+| `uv` | any version on `PATH` | downloaded to `.tools\uv` |
+| Python 3.11 | a 3.11 the machine already has | downloaded to `.python` |
+| `ffmpeg` and `ffprobe` | on `PATH` | downloaded to `.tools\ffmpeg` |
+| Node | on `PATH` | current LTS downloaded to `.tools\node` |
+| Claude Code | `claude` on `PATH` | installed into `.tools\claude` with `npm --prefix` |
+
+Measured, worst case, on a machine with none of them: 17 MB for uv, 190 MB for
+ffmpeg, 30 MB for Node, and 70 MB for Claude Code, which unpacks to 240 MB
+because it ships a native binary.
+
+Python 3.11 specifically, because `ctranslate2` publishes no wheels for newer
+versions. The dependencies go into `.venv`, and the Kokoro narrator and the CLIP
+encoders into `.models`.
+
+Nothing is installed globally, nothing is written to the user profile, the
+registry is untouched, and your `PATH` is not modified. The project's own copies
+are put on `PATH` for the life of a single run, by `Run.bat` and by
+`src/recap/config.py`, and never persisted. Deleting the folder removes every
+trace of the tool.
+
+A first run on a machine with none of this downloads about 750 MB, of which 460
+MB is models. Downloads are patient rather than parallel, because the default 30
 second timeout combined with eight simultaneous transfers causes every one of
-them to time out on a slow link. On a poor connection the first run can take
-several minutes, and re-running the script resumes from the cache rather than
-starting over.
+them to time out on a slow link. Re-running resumes from what is already there
+rather than starting over, and setup finishes with a `doctor` check that fails
+loudly if anything landed outside the project.
+
+Claude Code needs to be signed in once, with your own subscription. If setup
+installed it, it prints the path to run for that.
+
+## Moving it to another computer
+
+Copy the folder and run `Setup.bat` on the other machine. Everything that
+matters is either in the folder already or fetched by that script.
+
+Worth deleting before copying, since all of it is rebuilt on demand: `.venv`,
+`.python`, `.tools`, `.uv-cache`, and `cache`. `Cleanup.bat` option 9 followed by
+option B does exactly that. Keep `.models` if you want to save the 460 MB
+download on the other side.
 
 ## Quick start
 
@@ -434,6 +468,7 @@ Written to `cache/<source_id>/`.
 Only what you actually run sits in the root. Everything else is filed away.
 
 ```
+Setup.bat               install everything, inside this folder only
 Run.bat                 pick a film, then run everything
 Cleanup.bat             delete reclaimable files, one category at a time
 README.md               this document
@@ -442,6 +477,7 @@ uv.lock                 the resolved dependency versions
 scripts/
   analyze.py            command line entry point
   setup.ps1             project-scoped bootstrap
+  lib/fetch.ps1         download and unpack helpers used by setup
 src/recap/
   cli.py                Typer command line interface
   config.py             paths, tunables, environment containment
@@ -457,6 +493,9 @@ src/recap/
 input/                  put films here
 output/                 finished recaps, named by film and timestamp
 cache/                  per-film working data, safe to delete
+.tools/                 programs setup installed because this machine lacked them
+.venv/ .python/         the Python toolchain, also project-local
+.models/                the Kokoro narrator and the CLIP encoders
 ```
 
 ## Troubleshooting
@@ -464,11 +503,17 @@ cache/                  per-film working data, safe to delete
 **`doctor` reports the interpreter is not inside the project.** You are running
 the system Python. Use `.\.venv\Scripts\python.exe scripts\analyze.py` instead.
 
-**Setup fails with a network timeout.** Re-run `scripts\setup.ps1`. Completed downloads
-are cached in `.uv-cache` and are not fetched again.
+**Setup fails with a network timeout.** Run `Setup.bat` again. Anything that
+finished is kept, so it resumes rather than starting over.
 
-**ffmpeg or ffprobe not found.** Put them on `PATH`, or set the `FFMPEG` and
-`FFPROBE` environment variables to their full paths.
+**ffmpeg or ffprobe not found.** Run `Setup.bat`, which installs a copy into
+`.tools\ffmpeg` when the machine has none. To point at a build of your own
+instead, set the `FFMPEG` and `FFPROBE` environment variables to their full
+paths.
+
+**Stages 4 and 5 fail with claude not found.** Claude Code is missing, or it is
+installed but not signed in. Run `Setup.bat` to install it into `.tools\claude`,
+then run that copy once and sign in with your subscription.
 
 **Scene detection finds far too many or too few cuts.** Retune with
 `--threshold`. Detection during the proxy pass runs at a permissive floor and

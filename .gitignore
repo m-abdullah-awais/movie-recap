@@ -13,6 +13,8 @@ claude-rules.md
 .venv/
 .uv-cache/
 .models/
+# External programs Setup.bat installs here when the machine lacks them
+.tools/
 
 # Pipeline working data
 cache/

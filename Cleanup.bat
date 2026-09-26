@@ -60,7 +60,7 @@ echo  Think before choosing:
 echo.
 echo    7  Claude responses                 costs about 2 dollars to redo
 echo    8  Downloaded models                CLIP cannot be re-downloaded here
-echo    9  The whole Python toolchain       full setup again, very slow
+echo    9  The whole toolchain              full setup again, very slow
 echo.
 echo    A  Everything in groups 1 to 3      the safe sweep
 echo    B  Whole cache folder for all films keeps models and toolchain
@@ -257,18 +257,21 @@ rem ==========================================================
 rem  9  toolchain
 rem ==========================================================
 :opt_toolchain
-call :header "The whole Python toolchain"
-echo  About 500 MB: the virtual environment and the bundled Python.
+call :header "The whole toolchain"
+echo  About 500 MB: the virtual environment, the bundled Python, and
+echo  anything in .tools, which is where setup puts the programs this
+echo  computer did not already have, such as ffmpeg and Claude Code.
 echo.
-echo  Nothing in this project will run afterwards until scripts\setup.ps1
-echo  has been run again, which needs to download 80 MB. That took 53
-echo  minutes on this connection.
+echo  Nothing in this project will run afterwards until Setup.bat has
+echo  been run again. That downloads up to 550 MB, which took the best
+echo  part of an hour on this connection.
 echo.
-call :confirm "Delete the virtual environment and Python"
+call :confirm "Delete the virtual environment, Python and .tools"
 if errorlevel 1 goto after
 if exist ".venv" rd /s /q ".venv" >nul 2>&1
 if exist ".python" rd /s /q ".python" >nul 2>&1
-echo   Done. Run scripts\setup.ps1 before using the tool again.
+if exist ".tools" rd /s /q ".tools" >nul 2>&1
+echo   Done. Run Setup.bat before using the tool again.
 goto after
 
 rem ==========================================================
@@ -399,7 +402,7 @@ exit /b 1
 
 :sizes
 echo  Current sizes:
-for %%D in (".venv" ".python" ".uv-cache" ".models" "cache" "temp" "output") do call :one_size "%%~D"
+for %%D in (".venv" ".python" ".tools" ".uv-cache" ".models" "cache" "temp" "output") do call :one_size "%%~D"
 exit /b 0
 
 :one_size
