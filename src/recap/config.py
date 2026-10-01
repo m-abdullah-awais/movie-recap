@@ -203,6 +203,13 @@ class Settings:
     # of each rendered line.
     script_target_words: int = 2200
     script_words_per_minute: int = 150
+    # Used to turn the word budget into a segment count for the prompt. Measured
+    # across two runs, segments come out at 27 to 31 words whatever is asked, so
+    # the budget is divided by that to say how many to write. A word target on
+    # its own did not hold: once the prompt showed the dialogue, the model wrote
+    # a segment per exchange and produced a 26 minute recap, every segment
+    # individually within its length rule.
+    script_words_per_segment: int = 26
     # How far ahead of the narration's current position footage may be drawn
     # from. Without a cap, a segment early in the recap could be backed by a
     # shot from the finale.

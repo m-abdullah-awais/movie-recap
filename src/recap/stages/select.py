@@ -20,7 +20,7 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "select"
-VERSION = 10  # bumped: traversal positions clips without the anchor pulling back
+VERSION = 11  # bumped: footage window comes from the cited beat, and never repeats
 
 EDL_FILE = "edl.json"
 
@@ -91,42 +91,176 @@ def quantise(duration: float, fps: float | None) -> tuple[float, float]:
     return exact, (frames + 0.5) / fps
 
 
-def line_spans(lines: list[dict], default_s: float, max_span_s: float) -> list[tuple]:
-    """The stretch of film each line is responsible for showing.
+def _beat_lookup(cache: Cache) -> dict:
+    """Story beats by id, and the beat each script segment cites.
 
-    Anchors mark where a line begins, so a line runs until the next line that
-    starts somewhere else. Lines sharing an anchor, which is two thirds of them,
-    split that stretch between themselves in proportion to how long they are
-    spoken. The result tiles the film in order, so the recap always moves
-    forward and no line shows footage another line has claimed.
+    Narration files written before this stage needed beat ids do not carry one,
+    so the script is consulted to fill them in by position. That keeps an
+    existing cache working instead of forcing the whole story to be bought
+    again for the sake of one field.
     """
-    spans: list[tuple] = []
+    beats: dict = {}
+    story_path = cache.path("story.json")
+    if story_path.is_file():
+        try:
+            story = read_json(story_path)
+        except Exception:  # noqa: BLE001 - a missing story just means no windows
+            story = {}
+        for position, beat in enumerate(story.get("beats") or []):
+            identifier = beat.get("id", position)
+            try:
+                beats[int(identifier)] = beat
+            except (TypeError, ValueError):
+                continue
+    return beats
+
+
+def _segment_beats(cache: Cache) -> dict:
+    """Which beat each script segment cites, keyed by the segment's index."""
+    script_path = cache.path("script.json")
+    if not script_path.is_file():
+        return {}
+    try:
+        script = read_json(script_path)
+    except Exception:  # noqa: BLE001
+        return {}
+    mapping: dict = {}
+    for position, segment in enumerate(script.get("segments") or []):
+        identifier = segment.get("i", position)
+        if segment.get("beat_id") is not None:
+            mapping[identifier] = segment.get("beat_id")
+    return mapping
+
+
+def _group_key(line: dict):
+    """What makes two consecutive lines part of the same scene.
+
+    The beat they cite, when they cite one. Older narration files predate that
+    field, so the anchor is the fallback.
+    """
+    beat_id = line.get("beat_id")
+    if beat_id is not None:
+        return ("beat", beat_id)
+    return ("time", round(_num(line.get("story_time")), 2))
+
+
+def _beat_range(
+    line: dict, beats: dict, default_s: float, max_span_s: float
+) -> tuple[float, float]:
+    """Where in the film the beat this line narrates actually happens."""
+    anchor = _num(line.get("story_time"))
+    beat = beats.get(line.get("beat_id"))
+    low = _num(beat.get("start_s"), anchor) if beat else anchor
+    high = _num(beat.get("end_s"), low) if beat else low
+    if high <= low:
+        high = low + default_s
+    return low, min(high, low + max_span_s)
+
+
+def _group_split(
+    group: list[int], lines: list[dict], low: float, high: float
+) -> list[tuple]:
+    """Divide one beat between the lines that narrate it.
+
+    Splitting it into consecutive shares by spoken length treats the lines as
+    interchangeable, which they are not: one describes the cockpit, the next
+    describes the cabin. Each line instead sits over the moment it is about.
+
+    That moment is the line of dialogue the script stage cited, looked up in
+    the subtitles, so it is exact. It is the strongest signal available here by
+    a wide margin: a beat runs a median 103 seconds, while subtitle cues land
+    every 2.6, and CLIP disagrees with itself about where a scene is by a
+    median of 348 seconds on the test film. So the words place the window and
+    CLIP only ranks the shots inside it.
+
+    Windows are kept in order and never overlap, because the narration runs
+    forward and so must the picture.
+    """
+    spoken = [max(0.1, _num(lines[i].get("seconds"))) for i in group]
+    total = sum(spoken)
+
+    def proportional() -> list[tuple]:
+        out = []
+        cursor = low
+        for share in spoken:
+            width = (high - low) * share / total
+            out.append((cursor, cursor + width))
+            cursor += width
+        return out
+
+    # A window only has to be wide enough to offer a choice of shots for the
+    # footage that line needs, not to own an equal share of the scene. Dividing
+    # the beat exactly leaves no slack, and a window with no slack cannot move
+    # onto the moment it describes.
+    widths = [min(max(seconds * 1.6, 8.0), high - low) for seconds in spoken]
+    if sum(widths) > high - low:
+        return proportional()
+
+    bounds = []
+    cursor = low
+    for order, index in enumerate(group):
+        width = widths[order]
+        # Centred just after the cited line is spoken, because a shot of a line
+        # being said starts when it is said.
+        centre = _num(lines[index].get("story_time"), low) + width / 4.0
+        tail = sum(widths[order + 1:])
+        start = max(cursor, centre - width / 2.0)
+        start = min(start, high - tail - width)
+        start = max(start, low)
+        bounds.append((start, start + width))
+        cursor = start + width
+    return bounds
+
+
+def line_windows(
+    lines: list[dict],
+    beats: dict,
+    *,
+    default_s: float,
+    max_span_s: float,
+    content_start: float,
+    content_end: float,
+) -> list[tuple]:
+    """The stretch of film each line may show, and the ceiling that applies.
+
+    Every line is written about one story beat and cites it by id, so the beat's
+    own start and end are the window. Tiling by anchors instead, running each
+    line from its anchor to the next one, read well on paper and was wrong in
+    practice: where several lines share an anchor the later ones were pushed
+    past it, so a line describing a cockpit at 1018 seconds was given 1092 to
+    1125 to choose from and could not show that cockpit at all. Measured on the
+    test film, the best visual match lay inside the allowed window for only 14
+    lines out of 83.
+
+    Lines sharing a beat divide it between themselves in proportion to how long
+    they are spoken, so a group walks through the scene in order without showing
+    each other's footage.
+
+    The spoiler ceiling is raised to the end of the beat being narrated. Footage
+    of the very beat the words describe cannot spoil it, and a ceiling below the
+    window is what made eight lines collapse onto one repeated clip just under
+    the limit, in one case showing the same three seconds eight times.
+    """
+    windows: list[tuple] = []
     index = 0
     while index < len(lines):
-        anchor = _num(lines[index].get("story_time"))
-
+        key = _group_key(lines[index])
         group = [index]
         while (group[-1] + 1 < len(lines)
-               and abs(_num(lines[group[-1] + 1].get("story_time")) - anchor) < 0.01):
+               and _group_key(lines[group[-1] + 1]) == key):
             group.append(group[-1] + 1)
 
-        following = group[-1] + 1
-        end = (_num(lines[following].get("story_time"))
-               if following < len(lines) else anchor + default_s)
-        if end <= anchor:
-            end = anchor + default_s
-        end = min(end, anchor + max_span_s)
+        low, high = _beat_range(lines[index], beats, default_s, max_span_s)
+        low = max(low, content_start)
+        high = min(max(high, low + 1.0), content_end)
 
-        total = sum(max(0.1, _num(lines[i].get("seconds"))) for i in group)
-        cursor = anchor
-        for i in group:
-            share = max(0.1, _num(lines[i].get("seconds"))) / total
-            width = (end - anchor) * share
-            spans.append((cursor, cursor + width))
-            cursor += width
+        split = _group_split(group, lines, low, high)
+        for i, (start, end) in zip(group, split):
+            ceiling = max(_num(lines[i].get("spoiler_ceiling"), high), high)
+            windows.append((start, end, ceiling))
 
-        index = following
-    return spans
+        index = group[-1] + 1
+    return windows
 
 
 def build_traversal(
@@ -184,24 +318,42 @@ def build_traversal(
 
         best = int(np.argmax(local))
         if local[best] <= -1e5:
-            # Nothing usable ahead. Carry straight on from where we are.
-            begin = min(floor_time, max(content_start, content_end - piece))
+            # Nothing usable ahead. Carry straight on from where we are, and
+            # report the shot that stretch actually falls in rather than
+            # whichever index happened to win an argmax over excluded scores.
+            begin = max(floor_time, span_start)
+            chosen = int(np.searchsorted(starts, begin, side="right")) - 1
+            chosen = max(0, min(chosen, len(shots) - 1))
         else:
             begin = max(float(starts[best]), floor_time)
+            chosen = best
             taken.append(best)
 
         want = piece
-        if begin + want > min(ceiling, content_end):
-            begin = max(content_start, min(ceiling, content_end) - want)
+        limit = min(ceiling, content_end)
+        if begin + want > limit:
+            begin = max(content_start, limit - want)
+
+        # Never show the same seconds twice inside one line. Pinning against
+        # the ceiling used to do exactly that: every clip in the line came back
+        # as the same few seconds just under the limit. If the next clip cannot
+        # be placed after the previous one, stop, and let the shortfall be
+        # absorbed by lengthening the last clip rather than by repeating it.
+        if clips:
+            previous_end = clips[-1]["src_end"]
+            if begin < previous_end - 0.04:
+                begin = previous_end
+            if begin + want > limit:
+                break
 
         exact, request = quantise(want, source_fps)
         clips.append({
-            "shot_i": shots[best].get("i", best),
+            "shot_i": shots[chosen].get("i", chosen),
             "src_start": round(begin, 4),
             "src_end": round(begin + request, 4),
             "duration": round(exact, 4),
             "score": round(float(local[best]), 4),
-            "similarity": (round(float(similarity[best]), 4)
+            "similarity": (round(float(similarity[chosen]), 4)
                            if similarity is not None else None),
             "target_s": round(target, 2),
         })
@@ -320,10 +472,22 @@ def run(
 
     narration = read_json(narration_path)
     index = read_json(shots_path)
+    # Each line is written about one story beat, and the beat knows where in the
+    # film it happens. That range is what the line is allowed to show, so the
+    # story is read here rather than inferred from the gaps between anchors.
+    beats = _beat_lookup(cache)
     runtime_s = _num(index.get("runtime_s"))
     source_fps = index.get("source_fps")
     lines = narration.get("segments") or []
     shots = [s for s in (index.get("shots") or []) if s.get("has_keyframe")]
+    # Narration written before this stage needed beat ids does not carry one.
+    segment_beats = _segment_beats(cache)
+    for line in lines:
+        if line.get("beat_id") is None:
+            key = line.get("script_i", line.get("i"))
+            if key in segment_beats:
+                line["beat_id"] = segment_beats[key]
+
     if not lines:
         raise RuntimeError("there is no narration to lay footage against")
     if not shots:
@@ -403,9 +567,36 @@ def run(
         # beat picks up from there instead of cutting to somewhere else.
         last_story_time: float | None = None
         last_end: float | None = None
-        # The stretch of film each line is responsible for showing, tiled in
-        # order across the whole recap.
-        spans = line_spans(lines, settings.max_shot_distance_s, settings.max_span_s)
+        # Every line against every shot, computed once. The windows need it to
+        # place each line of a group on the moment it describes, and the loop
+        # below then rescales one row at a time for scoring.
+        raw_similarity = None
+        if use_clip:
+            raw_similarity = np.zeros((len(lines), len(shots)), dtype=np.float32)
+            for shot_position, shot_row in enumerate(rows):
+                if shot_row is not None and 0 <= shot_row < image_vectors.shape[0]:
+                    wanted = [
+                        min(int(line.get("script_i", line.get("i", 0))),
+                            query_vectors.shape[0] - 1)
+                        for line in lines
+                    ]
+                    raw_similarity[:, shot_position] = (
+                        query_vectors[wanted] @ image_vectors[shot_row]
+                    )
+
+        # The stretch of film each line may show, taken from the beat it cites.
+        spans = line_windows(
+            lines, beats,
+            default_s=settings.max_shot_distance_s,
+            max_span_s=settings.max_span_s,
+            content_start=content_start,
+            content_end=content_end,
+        )
+        # The furthest point already shown. The narration runs in story order,
+        # so the picture should too: without this, a line whose window starts
+        # behind the previous line's footage replays film the viewer has just
+        # seen, which is the repetition that is most obvious while watching.
+        shown_until = content_start
 
         gap_s = _num(narration.get("gap_s"))
         for position, line in enumerate(lines):
@@ -417,7 +608,9 @@ def run(
             if position < len(lines) - 1:
                 need += gap_s
             story_time = _num(line.get("story_time"))
-            ceiling = _num(line.get("spoiler_ceiling"), story_time)
+            # Raised to the end of the beat being narrated, because footage of
+            # the beat the words describe cannot spoil that beat.
+            ceiling = spans[position][2]
 
             proximity = np.array(
                 [proximity_score(float(m), story_time, settings.proximity_sigma_s)
@@ -426,15 +619,8 @@ def run(
             )
 
             similarity = np.zeros(len(shots), dtype=np.float32)
-            if use_clip:
-                wanted = line.get("script_i")
-                wanted = int(wanted) if wanted is not None else int(line.get("i", 0))
-                query = query_vectors[min(wanted, query_vectors.shape[0] - 1)]
-                # Distinct names on purpose: reusing the outer loop's variable
-                # here would clobber it for the rest of the iteration.
-                for shot_position, shot_row in enumerate(rows):
-                    if shot_row is not None and 0 <= shot_row < image_vectors.shape[0]:
-                        similarity[shot_position] = float(image_vectors[shot_row] @ query)
+            if use_clip and raw_similarity is not None:
+                similarity = raw_similarity[position].copy()
                 # Cosine similarity for CLIP sits in a narrow positive band, so
                 # it is rescaled per line. Otherwise proximity would dominate
                 # simply because it already spans zero to one.
@@ -485,10 +671,14 @@ def run(
             clips: list[dict] = []
 
             if settings.footage_mode == "traverse":
-                # Bounded by the line's own span rather than by a radius around
-                # the anchor. A 240 second span cannot be served from within 90
-                # seconds of its first moment.
-                span_lo, span_hi = spans[position]
+                # Bounded by the beat this line narrates rather than by a radius
+                # around the anchor. A 240 second beat cannot be served from
+                # within 90 seconds of its first moment.
+                span_lo, span_hi, _ = spans[position]
+                # Never go back over film already shown.
+                span_lo = max(span_lo, shown_until)
+                if span_hi <= span_lo + 0.5:
+                    span_hi = min(content_end, span_lo + max(need, settings.clip_target_s))
                 in_span = (middles >= span_lo - 10.0) & (middles <= span_hi + 10.0)
                 usable = np.where(in_span, quality, -1e6)
                 usable = np.where(uses < settings.max_shot_uses, usable, -1e6)
@@ -497,7 +687,7 @@ def run(
                     usable = np.where(starts <= ceiling, quality, -1e6)
                 clips = build_traversal(
                     need=need,
-                    span=spans[position],
+                    span=(span_lo, span_hi),
                     score=usable,
                     uses=uses,
                     starts=starts,
@@ -533,6 +723,9 @@ def run(
                 )
                 last_story_time = story_time
                 last_end = clips[-1]["src_end"] if clips else None
+
+            if clips:
+                shown_until = max(shown_until, max(c["src_end"] for c in clips))
 
             if clips and settings.footage_mode in ("traverse", "continuous"):
                 for clip in clips:

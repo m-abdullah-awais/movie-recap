@@ -262,6 +262,9 @@ def run(
                 "start_s": round(cursor, 3),
                 "end_s": round(cursor + seconds, 3),
                 "story_time": segment.get("story_time"),
+                # Stage 8 shows the beat this line narrates, so it needs to know
+                # which beat that is. Carried through rather than looked up.
+                "beat_id": segment.get("beat_id"),
                 "spoiler_ceiling": segment.get("spoiler_ceiling"),
                 "visual_query": segment.get("visual_query"),
                 "narration": item["text"],

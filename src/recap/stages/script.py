@@ -22,15 +22,15 @@ from ..cache import Cache, StageOutcome, read_json, run_stage, write_json
 from ..config import Settings
 
 STAGE = "script"
-VERSION = 2  # bumped: lines anchor to a cited beat, not an invented time
+VERSION = 3  # bumped: lines anchor to a cited line of dialogue
 
 SCRIPT_FILE = "script.json"
 CALL_DIR = "script_calls"
 
-PROMPT_VERSION = 2  # the prompt now asks for a beat id, so cached calls are stale
+PROMPT_VERSION = 4  # the prompt now sets a segment count as well as a word count
 
 PARAM_NAMES = (
-    "script_target_words", "script_words_per_minute",
+    "script_target_words", "script_words_per_minute", "script_words_per_segment",
     "spoiler_lookahead_s", "ai_model",
 )
 
@@ -49,7 +49,8 @@ CAST:
 {cast}
 
 You are writing act {act} of {act_count}, covering {start_s}s to {end_s}s of the film.
-Write about {target_words} words for this act.
+Write about {target_words} words for this act, in about {target_segments}
+segments. Never write more than {max_segments} segments.
 
 {previous}
 
@@ -61,8 +62,8 @@ BEATS TO COVER, in order:
 Return JSON with exactly this shape:
 {{
   "segments": [
-    {{"beat_id": int, "narration": "string", "visual_query": "string",
-      "characters": ["name"]}}
+    {{"beat_id": int, "line_id": int, "narration": "string",
+      "visual_query": "string", "characters": ["name"]}}
   ]
 }}
 
@@ -78,6 +79,13 @@ Rules for the other fields:
 - beat_id is the number of the beat this segment is narrating, taken from the
   list above. Use the beats in order. Several consecutive segments may share one
   beat when it needs more than one sentence, but never go backwards.
+- line_id is the number of the line of dialogue, from the same list, that is
+  spoken at the exact moment this segment describes. Pick the line the viewer
+  should be hearing as that sentence is narrated. It decides which few seconds
+  of film appear on screen, so choose the moment itself rather than the start
+  of the scene. It must belong to the beat named in beat_id, and like the beats
+  it must never go backwards. If the segment describes action with no dialogue,
+  give the nearest line before it.
 - visual_query describes what should be ON SCREEN, in plain visual words, so that
   a shot can be matched to it. Describe the picture, not the plot. Name people
   only by what they look like or are doing. A good example is "a teenage boy
@@ -170,20 +178,53 @@ def _format_cast(cast: list[dict]) -> str:
     return "\n".join(lines) or "- not identified"
 
 
-def _format_beats(beats: list[dict]) -> str:
-    """Beats as a numbered list, deliberately without timestamps.
+def _cue_time(cue: dict) -> float:
+    return _num(cue.get("start_s"), _num(cue.get("start")))
 
-    Segments cite a beat number and the code looks up that beat's real time.
-    Asking for a timestamp instead produced anchors that merely looked
-    plausible: measured on a 94 minute film, only 22 percent of lines landed
-    within 5 seconds of the beat they were describing, the median was 31 seconds
-    out and the worst 95. With lines about 55 seconds apart, that routinely
-    pointed a line at its neighbour's scene. Showing no timestamps also removes
-    the temptation to invent one.
+
+def beat_cues(beat: dict, cues: list[dict], limit: int = 40) -> list[tuple]:
+    """The dialogue spoken during one beat, as (id, cue) pairs.
+
+    Thinned evenly when a beat is very talkative, because the point is to let a
+    segment name the moment it is describing, and one line every few seconds is
+    already far finer than the beat itself.
     """
-    return "\n".join(
-        f"- beat {int(_num(b.get('i')))}: {b.get('summary')}" for b in beats
-    ) or "- no beats recorded for this stretch"
+    low = _num(beat.get("start_s"))
+    high = _num(beat.get("end_s"), low)
+    inside = [
+        (position, cue) for position, cue in enumerate(cues)
+        if low <= _cue_time(cue) <= high
+    ]
+    if len(inside) > limit:
+        step = len(inside) / float(limit)
+        inside = [inside[int(index * step)] for index in range(limit)]
+    return inside
+
+
+def _format_beats(beats: list[dict], cues: list[dict]) -> str:
+    """Beats as a numbered list, each followed by the dialogue spoken during it.
+
+    Segments cite a beat number and a line number, and the code looks up the
+    real time of each. Asking for a timestamp instead produced anchors that
+    merely looked plausible: measured on a 94 minute film, only 22 percent of
+    lines landed within 5 seconds of the beat they were describing, the median
+    was 31 seconds out and the worst 95.
+
+    The dialogue is what makes the anchor precise. A beat runs a median 103
+    seconds, so citing the beat alone leaves the footage a minute and a half of
+    room to be wrong in. Subtitle cues land every 2.6 seconds and their timings
+    are exact, so naming the line being narrated pins the moment about forty
+    times more tightly. No timestamps are shown, for the same reason as before.
+    """
+    blocks = []
+    for beat in beats:
+        lines = [f"- beat {int(_num(beat.get('i')))}: {beat.get('summary')}"]
+        for position, cue in beat_cues(beat, cues):
+            spoken = _WS_RE.sub(" ", str(cue.get("text") or "")).strip()[:70]
+            if spoken:
+                lines.append(f"    line {position}: {spoken}")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks) or "- no beats recorded for this stretch"
 
 
 def run(
@@ -201,6 +242,12 @@ def run(
     story = read_json(story_path)
     runtime_s = _num(story.get("runtime_s"))
     beats = story.get("beats") or []
+    # The dialogue, with its exact timings. Each segment names the line it is
+    # narrating, which is what places the footage to within a few seconds
+    # instead of somewhere inside a beat that runs a median 103.
+    transcript_path = cache.path("transcript.json")
+    cues = (read_json(transcript_path).get("cues") or []
+            if transcript_path.is_file() else [])
     twists = sorted(story.get("twists") or [], key=lambda t: _num(t.get("at_s")))
     if not beats:
         raise RuntimeError("the story has no beats, so there is nothing to narrate")
@@ -231,6 +278,8 @@ def run(
         cost = 0.0
         tokens = 0
         unresolved = 0
+        anchored = 0
+        misplaced = 0
         previous_tail = ""
 
         for act in acts:
@@ -242,6 +291,13 @@ def run(
             act_first = len(segments)
             share = (act["end_s"] - act["start_s"]) / span_total
             target = max(150, int(settings.script_target_words * share))
+            # A segment count as well as a word count. Showing the dialogue made
+            # the model write a segment per exchange: 126 segments and 3907 words
+            # against a 2200 word budget, a 26 minute recap where the brief asks
+            # for 10 to 20. A word target alone did not hold it, because each
+            # individual segment was within its length rule.
+            target_segments = max(3, round(target / settings.script_words_per_segment))
+            max_segments = max(4, int(target_segments * 1.2))
 
             # Only twists after this act begins are withheld. A reveal the
             # narration has already passed is fair game.
@@ -262,8 +318,10 @@ def run(
                 start_s=int(act["start_s"]),
                 end_s=int(act["end_s"]),
                 target_words=target,
+                target_segments=target_segments,
+                max_segments=max_segments,
                 previous=previous_tail or "This is the opening of the recap.",
-                beats=_format_beats(act_beats),
+                beats=_format_beats(act_beats, cues),
                 spoilers=spoilers,
             )
 
@@ -303,7 +361,32 @@ def run(
                     beat = fallback_order[min(len(segments) - act_first,
                                               len(fallback_order) - 1)]
                     unresolved += 1
-                story_time = _num(beat.get("start_s"), act["start_s"])
+                beat_start = _num(beat.get("start_s"), act["start_s"])
+                beat_end = _num(beat.get("end_s"), beat_start)
+                # The cited line of dialogue is what makes the anchor precise.
+                # Its time is looked up here rather than taken from the model,
+                # and it only counts when it really falls inside the beat the
+                # segment says it is narrating. Anything else is a drifting
+                # prompt, so it falls back to the beat and is counted.
+                story_time = beat_start
+                line_id = raw.get("line_id")
+                if line_id is not None:
+                    try:
+                        cue = cues[int(_num(line_id, -1))]
+                    except (IndexError, ValueError):
+                        cue = None
+                    if cue is not None:
+                        at = _cue_time(cue)
+                        if beat_start - 1.0 <= at <= beat_end + 1.0:
+                            story_time = at
+                            anchored += 1
+                        else:
+                            misplaced += 1
+                    else:
+                        misplaced += 1
+                else:
+                    misplaced += 1
+
                 story_time = min(max(story_time, act["start_s"]), act["end_s"])
                 # Narration must move forward through the film. A segment that
                 # goes backwards would show footage the recap has left behind.
@@ -359,6 +442,8 @@ def run(
                 "act_count": len(acts),
                 "act_failures": failures,
                 "unresolved_beat_ids": unresolved,
+                "dialogue_anchored": anchored,
+                "dialogue_unanchored": misplaced,
                 "mean_words_per_segment": round(total_words / len(segments), 1),
                 "cost_usd": round(cost, 4),
                 "tokens": tokens,
@@ -374,6 +459,10 @@ def run(
             f"{meta.get('word_count', 0)} words",
             f"~{meta.get('estimated_minutes', 0)} min",
         ]
+        anchored = meta.get("dialogue_anchored")
+        if anchored is not None:
+            total = anchored + (meta.get("dialogue_unanchored") or 0)
+            bits.append(f"{anchored}/{total} on a spoken line")
         if meta.get("cost_usd"):
             bits.append(f"${meta['cost_usd']:.2f}")
         elif meta.get("tokens"):
