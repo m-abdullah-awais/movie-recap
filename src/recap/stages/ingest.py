@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-from .. import ffmpeg, probe, srt
+from .. import ffmpeg, models, probe, srt
 from ..cache import Cache, StageOutcome, run_stage, write_json
 from ..config import MODELS_DIR, SIDECAR_SUB_EXTS, Settings
 
@@ -211,6 +211,24 @@ def run(
 
         # 3. Speech recognition, which needs the proxy audio.
         if wav is None or not wav.is_file():
+            # The model is checked before the film is read, not after. Reading a
+            # film takes minutes, and a download that was going to fail fails
+            # just as well beforehand. A recipient of this tool waited six
+            # minutes for the read and only then saw the model could not be
+            # fetched, which is six minutes spent to learn nothing.
+            if not models.whisper_available(settings.asr_model):
+                if not quiet:
+                    print("  this film has no usable subtitles, so speech "
+                          "recognition is needed")
+                if not models.ensure_whisper(settings.asr_model, quiet=quiet,
+                                             attempts=2):
+                    raise ModelUnavailable(
+                        f"the {settings.asr_model} speech model is not in "
+                        f"{MODELS_DIR.name} and could not be downloaded, and this "
+                        "film has no usable subtitles. Either run fetch-models "
+                        "when the connection is better, or place a matching .srt "
+                        "file next to the movie to skip recognition entirely."
+                    )
             raise NeedsAudio("speech recognition requires the proxy audio")
 
         cues = _transcribe(wav, runtime, settings, quiet)

@@ -833,7 +833,22 @@ def fetch_models(
     else:
         print("  ready: vision, text and tokenizer")
 
-    ok = voice and assets is not None
+    # Only needed for a film with no usable subtitles, which setup cannot know
+    # in advance. Fetched now rather than in the middle of a run, where it fails
+    # after the film has already been read.
+    name = Settings().asr_model
+    print(f"\nSpeech recognition model, {name}, about 250 MB")
+    speech = models.ensure_whisper(name, attempts=attempts)
+    if speech:
+        print("  ready")
+    else:
+        typer.secho(
+            "  unavailable. Films with subtitles still work. A film without them "
+            "needs this, or a matching .srt placed beside the movie.",
+            fg=typer.colors.YELLOW,
+        )
+
+    ok = voice and assets is not None and speech
     print()
     print("all models present" if ok else "some models are missing, see above")
     raise typer.Exit(0 if ok else 1)
@@ -890,10 +905,17 @@ def doctor():
         print(f"  {'in use':<24} NONE, {exc}")
 
     print("\nmodels")
-    for name, present in (("kokoro", models.kokoro_available()),
-                          ("clip", models.clip_available())):
-        note = "present" if present else "missing, run fetch-models"
-        print(f"  {name:<24} {note}")
+    settings = Settings()
+    for name, present, why in (
+        ("kokoro", models.kokoro_available(), "narration falls back to the system voice"),
+        ("clip", models.clip_available(), "footage is chosen by timing alone"),
+        (f"speech ({settings.asr_model})", models.whisper_available(settings.asr_model),
+         "a film without subtitles cannot be read"),
+    ):
+        if present:
+            print(f"  {name:<24} present")
+        else:
+            print(f"  {name:<24} missing, run fetch-models. Until then, {why}")
 
     print("\nhardware acceleration")
     try:

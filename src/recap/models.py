@@ -144,6 +144,60 @@ def ensure_kokoro(*, quiet: bool = False, attempts: int = 4) -> KokoroAssets | N
     return kokoro_paths()
 
 
+def whisper_available(name: str) -> bool:
+    """True when the speech model is already in the project's models directory.
+
+    Asked of faster-whisper itself rather than guessed from a path, because the
+    Hugging Face cache layout is its business and not this project's.
+    """
+    try:
+        from faster_whisper.utils import download_model
+    except ImportError:
+        return False
+    try:
+        download_model(name, local_files_only=True, cache_dir=str(MODELS_DIR))
+    except Exception:  # noqa: BLE001 - absent, partial, or unreadable all mean no
+        return False
+    return True
+
+
+def ensure_whisper(
+    name: str, *, quiet: bool = False, attempts: int = 4
+) -> bool:
+    """Fetch the speech recognition model, or return False so the caller degrades.
+
+    About 250 MB. It is only ever used for a film with no usable subtitles, but
+    that is not something setup can know in advance, so it is fetched up front:
+    a recipient of this tool hit a mid-run failure here after waiting six
+    minutes for the film to be read, because setup had reported every model
+    present while never having downloaded this one.
+    """
+    if whisper_available(name):
+        return True
+    try:
+        from faster_whisper.utils import download_model
+    except ImportError:
+        if not quiet:
+            print("  faster-whisper is not installed")
+        return False
+
+    last = ""
+    for attempt in range(attempts):
+        try:
+            if not quiet:
+                print(f"  fetching the {name} speech model, about 250 MB")
+            download_model(name, cache_dir=str(MODELS_DIR))
+            return True
+        except Exception as exc:  # noqa: BLE001 - any failure is retried then reported
+            last = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+            if attempt == attempts - 1:
+                break
+            time.sleep(min(60.0, 4.0 * (2 ** attempt)))
+    if not quiet:
+        print(f"  speech model unavailable: {last}")
+    return False
+
+
 def _percent(name: str) -> Callable[[int, int], None]:
     """Progress printer for a large download.
 

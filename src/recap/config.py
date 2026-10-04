@@ -104,6 +104,11 @@ def contain_environment() -> None:
     """
     for name, target in CONTAINED_ENV.items():
         os.environ[name] = str(target)
+    # Hugging Face warns on Windows that it cannot use symlinks and will copy
+    # files instead. That is the behaviour this project wants anyway, since a
+    # model has to be a real file inside the folder rather than a link to a
+    # shared cache, and the warning is eight lines of noise during a download.
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
 def prepend_local_tools() -> list[Path]:

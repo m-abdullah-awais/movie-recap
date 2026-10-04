@@ -283,12 +283,16 @@ if ($choice -ne 'claude') {
 # Models
 # --------------------------------------------------------------------------
 Write-Step 'Models'
-Write-Info 'The Kokoro narrator, about 340 MB, and the CLIP encoders, about 150 MB.'
+Write-Info 'The Kokoro narrator at 340 MB, the CLIP encoders at 150 MB, and the'
+Write-Info 'speech recognition model at 250 MB, for films that carry no subtitles.'
 & $python (Join-Path $PSScriptRoot 'analyze.py') fetch-models
 if ($LASTEXITCODE -ne 0) {
     Write-Host '   Some models are missing. The pipeline still runs and degrades:' -ForegroundColor Yellow
     Write-Host '   without Kokoro the narrator is the Windows system voice, and without' -ForegroundColor Yellow
-    Write-Host '   CLIP the footage is chosen by timing alone. Re-run this script later.' -ForegroundColor Yellow
+    Write-Host '   CLIP the footage is chosen by timing alone. The speech model is the' -ForegroundColor Yellow
+    Write-Host '   one exception: without it, a film carrying no subtitles cannot be' -ForegroundColor Yellow
+    Write-Host '   read at all, though you can drop a matching .srt beside the movie' -ForegroundColor Yellow
+    Write-Host '   instead. Re-run this script later to try again.' -ForegroundColor Yellow
 }
 
 # --------------------------------------------------------------------------
